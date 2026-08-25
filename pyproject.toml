@@ -1,0 +1,94 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "tmpkit"
+version = "0.1.0"
+description = "Ergonomic tempfile & tempdir context managers with auto-cleanup, atomic writes, async support, and zero dependencies."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+authors = [{ name = "Mathias Paulenko" }]
+keywords = ["tempfile", "temp", "temporary", "context manager", "cleanup", "async", "atomic", "filesystem", "tmp"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: System :: Filesystems",
+    "Typing :: Typed",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "pytest-cov>=5.0",
+    "ruff>=0.6.0",
+    "mypy>=1.11.0",
+    "build>=1.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/MathiasPaulenko/tmpkit"
+Repository = "https://github.com/MathiasPaulenko/tmpkit"
+Issues = "https://github.com/MathiasPaulenko/tmpkit/issues"
+Changelog = "https://github.com/MathiasPaulenko/tmpkit/blob/main/CHANGELOG.md"
+
+[tool.hatch.build.targets.wheel]
+packages = ["tmpkit"]
+
+[tool.ruff]
+target-version = "py311"
+src = ["tmpkit", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "B",    # bugbear
+    "C4",   # comprehensions
+    "UP",   # pyupgrade
+    "SIM",  # simplify
+    "RUF",  # ruff-specific
+]
+ignore = ["E501"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+disallow_untyped_decorators = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+warn_unreachable = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "--cov=tmpkit --cov-branch --cov-report=term-missing"
+
+[tool.coverage.run]
+source = ["tmpkit"]
+branch = true
+
+[tool.coverage.report]
+fail_under = 95
+show_missing = true
