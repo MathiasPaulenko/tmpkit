@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Nothing yet.
+
+### Changed
+
+- Nothing yet.
+
+### Deprecated
+
+- Nothing yet.
+
+### Removed
+
+- Nothing yet.
+
+### Fixed
+
+- Nothing yet.
+
+### Security
+
+- Nothing yet.
+
+## [1.0.0] - 2025-01-24
+
+### Added
+
 - Project design documents in `ref/` (context, competitor analysis, features, design, API contract, object spec, migration guide).
 - `temp_file()` sync context manager with auto-cleanup.
 - `temp_dir()` sync context manager with auto-cleanup.
@@ -37,15 +63,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Nothing yet (pre-release).
+- Nothing yet.
 
 ### Deprecated
 
-- Nothing yet (pre-release).
+- Nothing yet.
 
 ### Removed
 
-- Nothing yet (pre-release).
+- Nothing yet.
 
 ### Fixed
 
