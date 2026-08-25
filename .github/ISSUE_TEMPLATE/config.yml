@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Discussion
+    url: https://github.com/MathiasPaulenko/tmpkit/discussions
+    about: Ask questions and discuss ideas with the community
+  - name: Security Report
+    url: https://github.com/MathiasPaulenko/tmpkit/security/policy
+    about: Report security vulnerabilities privately (do NOT open public issues)
