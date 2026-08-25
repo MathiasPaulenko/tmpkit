@@ -86,7 +86,7 @@ class TestAsyncCwd:
     async def test_cwd_changes_and_restores(self) -> None:
         original = Path.cwd()
         async with async_temp_dir(cwd=True) as d:
-            assert Path.cwd() == d
+            assert Path.cwd().resolve() == d.resolve()
         assert Path.cwd() == original
 
     async def test_cwd_restored_on_exception(self) -> None:

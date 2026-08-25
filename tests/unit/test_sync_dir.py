@@ -146,7 +146,7 @@ class TestCwd:
     def test_cwd_changes_to_temp_dir(self) -> None:
         original = Path.cwd()
         with temp_dir(cwd=True) as d:
-            assert Path.cwd() == d
+            assert Path.cwd().resolve() == d.resolve()
         assert Path.cwd() == original
 
     def test_cwd_restored_on_exception(self) -> None:
@@ -166,10 +166,10 @@ class TestCwd:
         outer = temp_dir(cwd=True)
         inner = temp_dir(cwd=True)
         with outer as od:
-            assert Path.cwd() == od
+            assert Path.cwd().resolve() == od.resolve()
             with inner as id_:
-                assert Path.cwd() == id_
-            assert Path.cwd() == od
+                assert Path.cwd().resolve() == id_.resolve()
+            assert Path.cwd().resolve() == od.resolve()
         assert Path.cwd() == original
 
     def test_cwd_with_keep(self) -> None:
