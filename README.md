@@ -6,7 +6,8 @@ Ergonomic tempfile & tempdir context managers with auto-cleanup, atomic writes, 
 [![PyPI](https://img.shields.io/pypi/v/tmpkit)](https://pypi.org/project/tmpkit/)
 [![Python](https://img.shields.io/pypi/pyversions/tmpkit)](https://pypi.org/project/tmpkit/)
 [![License](https://img.shields.io/pypi/l/tmpkit)](https://github.com/MathiasPaulenko/tmpkit/blob/main/LICENSE)
-[![Coverage](https://img.shields.io/codecov/c/github/MathiasPaulenko/tmpkit)](https://codecov.io/gh/MathiasPaulenko/tmpkit)
+[![Coverage](https://img.shields.io/badge/coverage-99.57%25-brightgreen)](https://github.com/MathiasPaulenko/tmpkit/actions/workflows/ci.yml)
+[![Downloads](https://img.shields.io/pypi/dm/tmpkit)](https://pypi.org/project/tmpkit/)
 
 ---
 
