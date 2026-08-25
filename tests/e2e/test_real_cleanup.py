@@ -80,7 +80,7 @@ class TestRealDirCleanup:
     def test_dir_cwd_restored_after_exit(self) -> None:
         original = Path.cwd()
         with temp_dir(cwd=True) as d:
-            assert Path.cwd() == d
+            assert Path.cwd().resolve() == d.resolve()
         assert Path.cwd() == original
 
     def test_dir_tree_fully_removed(self) -> None:
