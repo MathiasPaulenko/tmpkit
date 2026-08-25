@@ -94,6 +94,18 @@ jobs:
       - name: Install from PyPI
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          pip install "tmpkit==${VERSION}"
+          # PyPI indexing can lag behind publication; retry until available.
+          for i in $(seq 1 12); do
+            if pip install "tmpkit==${VERSION}" 2>/dev/null; then
+              echo "Installed tmpkit==${VERSION} after ${i} attempt(s)."
+              break
+            fi
+            echo "Attempt ${i}: tmpkit==${VERSION} not yet indexed on PyPI. Retrying in 15s..."
+            sleep 15
+          done
+          pip show "tmpkit==${VERSION}" >/dev/null 2>&1 || {
+            echo "ERROR: tmpkit==${VERSION} not available on PyPI after 3 minutes."
+            exit 1
+          }
       - name: Smoke test
         run: python -c "from tmpkit import temp_file, temp_dir; print('ok')"
