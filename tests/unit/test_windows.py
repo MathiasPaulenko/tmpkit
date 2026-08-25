@@ -149,8 +149,17 @@ class TestMkstempUsage:
 
 
 class TestWindowsNameMock:
-    """Mock os.name=='nt' to exercise Windows code paths on non-Windows."""
+    """Mock os.name=='nt' to exercise Windows code paths on non-Windows.
 
+    These tests mock ``os.name`` to ``"nt"`` to verify that tmpkit's code
+    paths don't break when ``os.name`` is ``"nt"``. However, ``tempfile``
+    uses ``os.name`` internally to select the temp directory and path
+    conventions, so mocking it on non-Windows causes ``mkstemp``/``mkdtemp``
+    to produce paths that don't exist on the real filesystem. Therefore
+    these tests only run on Windows.
+    """
+
+    @pytest.mark.skipif(os.name != "nt", reason="requires real Windows filesystem")
     def test_file_works_with_nt_name(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(os, "name", "nt")
         with temp_file() as f:
@@ -158,12 +167,14 @@ class TestWindowsNameMock:
             f.seek(0)
             assert f.read() == b"test"
 
+    @pytest.mark.skipif(os.name != "nt", reason="requires real Windows filesystem")
     def test_dir_works_with_nt_name(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(os, "name", "nt")
         with temp_dir() as d:
             assert d.exists()
         assert not d.exists()
 
+    @pytest.mark.skipif(os.name != "nt", reason="requires real Windows filesystem")
     def test_close_does_not_delete_with_nt_name(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
