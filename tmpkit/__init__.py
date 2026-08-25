@@ -9,7 +9,7 @@ from tmpkit._decorators import temp_file as temp_file_decorator
 from tmpkit._registry import temp_registry
 from tmpkit._sync import temp_dir, temp_file
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 __all__ = [
     "async_atomic_write",

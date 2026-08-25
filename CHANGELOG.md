@@ -31,6 +31,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Nothing yet.
 
+## [1.0.1] - 2025-01-24
+
+### Fixed
+
+- Bump `codecov/codecov-action` from v4 to v7 to resolve Node.js 20
+  deprecation warnings in CI.
+- Fix `test_windows.py` failures on Linux/macOS — `TestWindowsNameMock`
+  tests now skip on non-Windows platforms.
+- Fix macOS CI failures from `/var` symlink resolution — cwd tests now
+  compare resolved paths.
+
 ## [1.0.0] - 2025-01-24
 
 ### Added
