@@ -9,10 +9,10 @@ description = "Ergonomic tempfile & tempdir context managers with auto-cleanup, 
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
-authors = [{ name = "Mathias Paulenko" }]
+authors = [{ name = "Mathias Paulenko", email = "mathias.paulenko@outlook.com" }]
 keywords = ["tempfile", "temp", "temporary", "context manager", "cleanup", "async", "atomic", "filesystem", "tmp"]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",

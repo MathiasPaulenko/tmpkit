@@ -4,15 +4,15 @@
 
 | Version | Supported          |
 |---------|--------------------|
-| 0.1.x   | :white_check_mark: |
-| < 0.1   | :x:                |
+| 1.0.x   | :white_check_mark: |
+| < 1.0   | :x:                |
 
 ## Reporting a Vulnerability
 
 If you discover a security vulnerability in tmpkit, please report it responsibly.
 
 1. **Do NOT open a public GitHub issue.**
-2. Email **security@mathiaspaulenko.com** with a description of the vulnerability and, if possible, a proof of concept.
+2. Email **mathias.paulenko@outlook.com** with a description of the vulnerability and, if possible, a proof of concept.
 3. You will receive an acknowledgment within **48 hours**.
 4. We will investigate and, if confirmed, release a fix as soon as possible depending on severity.
 
