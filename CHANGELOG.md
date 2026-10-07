@@ -5,31 +5,53 @@ All notable changes to tmpkit will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.1.0] - 2026-10-07
 
 ### Added
 
-- Nothing yet.
+- `keep=True` and `cleanup_hook=` parameters on `atomic_write()` (sync and async).
+- `cleanup_hook=` parameter on `@temp_dir()` and `@temp_file()` decorators.
+- `TempRecord` and `TempFileLike` are now exported from `tmpkit`.
+- `atomic_write()` fsyncs the destination directory after `os.replace()`
+  for rename durability (best-effort, no-op on Windows).
 
 ### Changed
 
-- Nothing yet.
-
-### Deprecated
-
-- Nothing yet.
-
-### Removed
-
-- Nothing yet.
+- `read`/`write`/`seek`/`tell`/`.path`/`__fspath__` before `__enter__` now
+  raise `RuntimeError` instead of `AssertionError`.
+- `@temp_file()` on a class now raises `TypeError` instead of silently
+  producing a broken function.
+- Class decoration with `@temp_dir()` now skips `staticmethod` and
+  `classmethod` members named `test_*` (they have no `self`).
+- Tests are now type-checked under `mypy --strict` with relaxed per-module
+  rules (`[[tool.mypy.overrides]]`); `tests/` is now a package.
+- Dev dependency floors bumped (`ruff>=0.16.0`, `mypy>=2.3.0`) and
+  pre-commit hook revisions aligned (`ruff v0.16.1`, `mypy v2.3.1`).
 
 ### Fixed
 
-- Nothing yet.
+- Release workflow: the PyPI verify job used `pip show tmpkit==X.Y.Z`,
+  which always failed (`pip show` doesn't accept version specifiers).
+- Body exceptions are no longer masked by cleanup failures: a failing
+  `close()`/`flush()`/`fsync()`/`rmtree` during exception propagation
+  no longer replaces the original error.
+- `temp_dir(cwd=True)`: a non-`OSError` failure while restoring the
+  working directory no longer leaks the temp directory.
+- `atomic_write()` raises `IsADirectoryError` early when `dest` is an
+  existing directory.
+- `__repr__` now reports `kept` for temps kept via the close/flush
+  failure path.
+- `__enter__` re-entry fully resets internal state (`_path`, `_file`).
+- README: fixed the `temp_dir` `.keep()` example (it called `.keep()`
+  after the `with` block, which raises `RuntimeError`), corrected
+  `async_temp_file()` naming, and documented the process-global nature
+  of `cwd=True`.
 
-### Security
+### Removed
 
-- Nothing yet.
+- `tests/conftest.py`: dropped the unused `assert_no_temps_left` fixture.
+- `TestWindowsNameMock` tests, which mocked `os.name` to `"nt"` — a no-op
+  on Windows (the only platform they ran on).
 
 ## [1.0.1] - 2025-01-24
 

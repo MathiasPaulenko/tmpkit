@@ -4,4 +4,4 @@ import tmpkit
 
 
 def test_import() -> None:
-    assert tmpkit.__version__ == "1.0.1"
+    assert tmpkit.__version__ == "1.1.0"

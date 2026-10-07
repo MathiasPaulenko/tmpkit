@@ -10,7 +10,7 @@ from tmpkit._registry import TempRecord, temp_registry
 from tmpkit._sync import temp_dir, temp_file
 from tmpkit._types import TempFileLike
 
-__version__ = "1.0.1"
+__version__ = "1.1.0"
 
 __all__ = [
     "TempFileLike",
