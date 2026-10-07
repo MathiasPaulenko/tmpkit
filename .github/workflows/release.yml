@@ -103,8 +103,9 @@ jobs:
             echo "Attempt ${i}: tmpkit==${VERSION} not yet indexed on PyPI. Retrying in 15s..."
             sleep 15
           done
-          pip show "tmpkit==${VERSION}" >/dev/null 2>&1 || {
-            echo "ERROR: tmpkit==${VERSION} not available on PyPI after 3 minutes."
+          INSTALLED="$(python -c 'import importlib.metadata; print(importlib.metadata.version("tmpkit"))' 2>/dev/null)"
+          [ "$INSTALLED" = "$VERSION" ] || {
+            echo "ERROR: expected tmpkit==${VERSION}, got '${INSTALLED:-not installed}' after 3 minutes."
             exit 1
           }
       - name: Smoke test
