@@ -38,8 +38,10 @@ Thank you for your interest in contributing to tmpkit! This document describes t
 - **Type checker**: [mypy](https://mypy-lang.org/) with `--strict`.
 
   ```bash
-  mypy --strict tmpkit/
+  mypy --strict tmpkit/ tests/
   ```
+
+  Tests are checked with relaxed rules (see `[[tool.mypy.overrides]]` in `pyproject.toml`) since they exercise decorator-injected arguments and private internals.
 
 - **Python**: Target 3.11+ syntax. Use `from __future__ import annotations` in all modules.
 - **Imports**: Sorted by ruff (isort-compatible). Stdlib first, then third-party, then local.
@@ -108,8 +110,7 @@ tmpkit/
 │   ├── unit/            # Unit tests
 │   ├── integration/     # Integration tests
 │   └── e2e/             # End-to-end tests
-├── pyproject.toml       # Build config, tool config
-└── ref/                 # Internal design docs (not shipped)
+└── pyproject.toml       # Build config, tool config
 ```
 
 ## Reporting Issues

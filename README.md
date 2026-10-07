@@ -6,7 +6,7 @@ Ergonomic tempfile & tempdir context managers with auto-cleanup, atomic writes, 
 [![PyPI](https://img.shields.io/pypi/v/tmpkit)](https://pypi.org/project/tmpkit/)
 [![Python](https://img.shields.io/pypi/pyversions/tmpkit)](https://pypi.org/project/tmpkit/)
 [![License](https://img.shields.io/pypi/l/tmpkit)](https://github.com/MathiasPaulenko/tmpkit/blob/main/LICENSE)
-[![Coverage](https://img.shields.io/badge/coverage-99.57%25-brightgreen)](https://github.com/MathiasPaulenko/tmpkit/actions/workflows/ci.yml)
+[![Coverage](https://codecov.io/gh/MathiasPaulenko/tmpkit/graph/badge.svg)](https://codecov.io/gh/MathiasPaulenko/tmpkit)
 [![Downloads](https://img.shields.io/pypi/dm/tmpkit)](https://pypi.org/project/tmpkit/)
 
 ---
@@ -38,7 +38,7 @@ Ergonomic tempfile & tempdir context managers with auto-cleanup, atomic writes, 
 
 ## Why tmpkit?
 
-Python's `tempfile` gives you the pieces but forces you to write cleanup boilerplate every time. tmpkit wraps it in ergonomic context managers that **guarantee cleanup** — with features nobody else offers.
+Python's `tempfile` gives you the pieces but forces you to write cleanup boilerplate every time. tmpkit wraps it in ergonomic context managers that **always attempt cleanup** on exit — with features nobody else offers.
 
 ```python
 # stdlib — verbose, easy to forget cleanup
@@ -50,7 +50,7 @@ try:
 finally:
     shutil.rmtree(tmpdir, ignore_errors=True)
 
-# tmpkit — one line, always cleans up
+# tmpkit — one line, cleans up on exit
 from tmpkit import temp_file
 with temp_file(suffix=".csv") as f:
     f.write(data)
@@ -81,7 +81,7 @@ This installs `pytest`, `pytest-asyncio`, `pytest-cov`, `ruff`, `mypy`, and `bui
 ```python
 from tmpkit import temp_file, temp_dir, atomic_write, async_temp_file
 
-# Temp file
+# Temp file (default mode is "w+b" — binary; use mode="w+" for str)
 with temp_file(suffix=".csv", prefix="myapp_") as f:
     f.write(data)
     # deleted on exit
@@ -111,7 +111,7 @@ with temp_file(dest="output.csv") as f:
 # Async
 async def main() -> None:
     async with async_temp_file(suffix=".json") as f:
-        await f.write(data)
+        await f.write(data)  # bytes by default; mode="w+" for str
 ```
 
 ---
@@ -131,7 +131,7 @@ async def main() -> None:
 - **`@temp_dir()` / `@temp_file()` decorators** — inject temps into functions and test classes.
 - **Close without delete** — file survives `close()`, deleted on context exit (Windows subprocess friendly).
 - **`.path` attribute** — `Path` object, no more `Path(f.name)` boilerplate.
-- **Async support** — `async with temp_file() as f:` with async I/O methods.
+- **Async support** — `async with async_temp_file() as f:` with async I/O methods.
 - **Windows-safe by default** — no `O_TEMPORARY` lock, `ignore_cleanup_errors=True`.
 - **Zero dependencies** — stdlib only.
 
@@ -150,7 +150,7 @@ with temp_file(
     dir: str | Path | None = None,    # parent directory
     mode: str = "w+b",                # open mode
     content: str | bytes | None = None,  # pre-populate
-    dest: str | Path | None = None,   # move here on success
+    dest: str | Path | None = None,   # move here on success (parent must exist at exit)
     keep: bool = False,               # always keep
     keep_on_error: bool = False,      # keep only on exception
     ignore_cleanup_errors: bool = True,
@@ -193,12 +193,12 @@ with temp_dir(
 td = temp_dir()
 with td as d:
     (d / "file.txt").write_text("hello")
-td.keep()           # runtime decision to keep
+    td.keep()       # runtime decision to keep (must be inside the block)
 ```
 
-**Returns:** A `Path` object (the temp directory path) with `/` operator support. To call `.keep()`, use the context manager object directly (see example above).
+**Returns:** A `Path` object (the temp directory path) with `/` operator support. To call `.keep()`, use the context manager object directly (see example above) — it must be called **inside** the `with` block; calling it after exit raises `RuntimeError`.
 
-**`cwd=True`:** Changes the working directory to the temp dir on `__enter__`, restores the original on `__exit__`.
+**`cwd=True`:** Changes the working directory to the temp dir on `__enter__`, restores the original on `__exit__`. Warning: `os.chdir` is process-global — do not use `cwd=True` from multiple threads or concurrent async tasks.
 
 ### `atomic_write()`
 
@@ -213,8 +213,10 @@ with atomic_write(
     prefix: str | None = None,
     suffix: str = ".tmp",
     fsync: bool = True,               # fsync before rename
+    keep: bool = False,               # keep temp, dest untouched
     keep_on_error: bool = False,
     ignore_cleanup_errors: bool = True,
+    cleanup_hook: Callable[[Path], None] | None = None,
 ) as f:
     f.write(data)
 # on success: atomically renamed to dest
@@ -222,6 +224,10 @@ with atomic_write(
 ```
 
 Writes to a temp file in `dest`'s parent directory, then atomically replaces `dest` via `os.replace()` on success. On error, the temp is cleaned up and `dest` is left untouched.
+
+**Note:** with `keep=True`, `.keep()`, `keep_on_error=True` + exception, or `DEBUG=1`, the temp file is kept and **the replace is skipped** — `dest` is left untouched even on success.
+
+**Validation on enter:** raises `IsADirectoryError` if `dest` is an existing directory, `FileNotFoundError` if `dest`'s parent doesn't exist, and `NotADirectoryError` if the parent exists but isn't a directory — before writing anything.
 
 ### `@temp_dir()` Decorator
 
@@ -249,9 +255,9 @@ class TestMyApp:
         assert self.tmpdir.exists()
 ```
 
-**Decorator defaults:** `cwd=True` (unlike the context manager where `cwd=False` by default).
+**Decorator defaults:** `cwd=True` (unlike the context manager where `cwd=False` by default). Accepts the same parameters as `temp_dir()`, including `cleanup_hook`. Only plain functions and classes — decorating a single method injects the temp path in place of `self`.
 
-**Class decoration:** Each method starting with `test_` is wrapped. The temp dir is available as `self.tmpdir`. Works with both sync and async test methods.
+**Class decoration:** Each method starting with `test_` is wrapped (`staticmethod`/`classmethod` members are skipped). The temp dir is available as `self.tmpdir`. Works with both sync and async test methods.
 
 ### `@temp_file()` Decorator
 
@@ -272,7 +278,7 @@ async def process_async(f, data: str) -> None:
     await f.write(data)
 ```
 
-The temp file object is injected as the **first positional argument**.
+The temp file object is injected as the **first positional argument**. Accepts the same parameters as `temp_file()`, including `cleanup_hook`. Plain functions only — decorating a class raises `TypeError`.
 
 ### `temp_registry`
 
@@ -308,7 +314,7 @@ temp_registry.clear_history()
 temp_registry.disable()
 ```
 
-**`TempRecord` fields:**
+**`TempRecord`** is importable for type annotations: `from tmpkit import TempRecord`. Fields:
 
 | Field | Type | Description |
 | --- | --- | --- |
@@ -319,6 +325,8 @@ temp_registry.disable()
 | `kept` | `bool` | Whether it was kept |
 
 **Thread-safe:** All operations are protected by `threading.Lock`.
+
+**Note:** records accumulate for the lifetime of the process. In long-running applications, call `temp_registry.clear_history()` periodically (or `reset()`) to bound memory usage.
 
 ### Async API
 
@@ -352,7 +360,7 @@ Async file objects support `await f.read()`, `await f.write()`, `await f.seek()`
 | `DEBUG` | `1` | Same as `TMPKIT_DEBUG=1` (fallback) |
 | `TMPKIT_REGISTRY` | `1` | Enable `temp_registry` at import time |
 
-`TMPKIT_DEBUG` takes precedence over `DEBUG`.
+`TMPKIT_DEBUG` takes precedence over `DEBUG`. Since `DEBUG` is a common variable name in other tools, you can set `TMPKIT_DEBUG=0` to explicitly disable keep-all even when `DEBUG=1` is present.
 
 ---
 
@@ -398,6 +406,11 @@ def my_hook(path: Path) -> None:
 with temp_file(cleanup_hook=my_hook) as f:
     f.write(data)
 # hook is called, then standard cleanup runs
+
+# Hook also runs when the temp is moved via dest=
+with temp_file(dest="output.csv", cleanup_hook=my_hook) as f:
+    f.write(data)
+# hook is called, then temp is moved to output.csv
 
 # Hook is called even on exceptions
 with temp_file(cleanup_hook=my_hook) as f:
@@ -471,4 +484,4 @@ See [CHANGELOG.md](CHANGELOG.md) for a full list of changes.
 
 ## License
 
-[MIT](LICENSE) — Copyright (c) 2025 Mathias Paulenko
+[MIT](LICENSE) — Copyright (c) 2025-2026 Mathias Paulenko
