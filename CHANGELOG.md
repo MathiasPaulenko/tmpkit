@@ -5,6 +5,15 @@ All notable changes to tmpkit will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- Error-path tests no longer close raw fds underneath live file objects —
+  GC finalization could close an fd number the OS had already reissued to
+  a different temp file, producing flaky `EBADF` failures (seen in CI on
+  `test_ignore_false_propagates_error`).
+
 ## [1.1.0] - 2026-10-07
 
 ### Added

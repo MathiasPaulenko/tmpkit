@@ -534,9 +534,10 @@ class TestSyncCloseFailure:
 
         def patched_fdopen(fd: int, mode: str = "w+b", **kwargs: object) -> object:
             f = original_fdopen(fd, mode, **kwargs)
+            real_close = f.close
 
             def failing_close() -> None:
-                os_mod.close(fd)  # actually close the fd so unlink works
+                real_close()  # actually close so unlink works and __del__ stays inert
                 raise OSError("close fail")
 
             f.close = failing_close  # type: ignore[method-assign]
@@ -555,9 +556,10 @@ class TestSyncCloseFailure:
 
         def patched_fdopen(fd: int, mode: str = "w+b", **kwargs: object) -> object:
             f = original_fdopen(fd, mode, **kwargs)
+            real_close = f.close
 
             def failing_close() -> None:
-                os_mod.close(fd)  # actually close the fd
+                real_close()  # actually close so unlink works and __del__ stays inert
                 raise OSError("close fail")
 
             f.close = failing_close  # type: ignore[method-assign]
@@ -587,9 +589,10 @@ class TestSyncCloseFailure:
 
             def patched_fdopen(fd: int, mode: str = "w+b", **kwargs: object) -> object:
                 f = original_fdopen(fd, mode, **kwargs)
+                real_close = f.close
 
                 def failing_close() -> None:
-                    os_mod.close(fd)
+                    real_close()
                     raise OSError("close fail")
 
                 f.close = failing_close  # type: ignore[method-assign]
@@ -618,17 +621,15 @@ class TestAtomicCloseFailure:
     def test_close_failure_after_flush_still_replaces(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        import os as os_mod
-
         dest = tmp_path / "out.txt"
         w = atomic_write(dest, mode="w")
         w.__enter__()
         w.write("data")
 
-        fd = w._file.fileno()
+        real_close = w._file.close
 
         def failing_close() -> None:
-            os_mod.close(fd)  # actually close so os.replace works
+            real_close()  # actually close so os.replace works and __del__ stays inert
             raise OSError("close fail")
 
         # Patch close to fail — flush already succeeded so close failure is suppressed
@@ -926,7 +927,13 @@ class TestEnterCleanupFailurePreservesOriginalError:
 
         def patched_fdopen(fd: int, mode: str = "w", **kwargs: object) -> object:
             f = original_fdopen(fd, mode, **kwargs)
-            f.close = lambda: (_ for _ in ()).throw(OSError("close fail"))  # type: ignore[method-assign]
+            real_close = f.close
+
+            def throwing_close() -> None:
+                real_close()
+                raise OSError("close fail")
+
+            f.close = throwing_close  # type: ignore[method-assign]
             return f
 
         monkeypatch.setattr("os.fdopen", patched_fdopen)
@@ -950,9 +957,10 @@ class TestCleanupDoesNotMaskBodyException:
 
         def patched_fdopen(fd: int, mode: str = "w+b", **kwargs: object) -> object:
             f = original_fdopen(fd, mode, **kwargs)
+            real_close = f.close
 
             def failing_close() -> None:
-                os_mod.close(fd)
+                real_close()  # actually close so __del__ stays inert
                 raise OSError("close fail")
 
             f.close = failing_close  # type: ignore[method-assign]
