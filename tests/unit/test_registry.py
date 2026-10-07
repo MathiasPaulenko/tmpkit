@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -11,7 +12,7 @@ from tmpkit._sync import temp_dir, temp_file
 
 
 @pytest.fixture(autouse=True)
-def _reset_registry() -> None:
+def _reset_registry() -> Iterator[None]:
     """Reset registry state before and after each test."""
     temp_registry.reset()
     yield
@@ -270,11 +271,9 @@ class TestTempRegistryThreadSafety:
         reg = TempRegistry()
         reg.enable()
         # Register some real temp files
-        paths: list[Path] = []
         for _ in range(10):
             with temp_file(keep=True) as f:
                 reg.register(f.path, "file")
-                paths.append(f.path)
 
         assert len(reg.active) == 10
 

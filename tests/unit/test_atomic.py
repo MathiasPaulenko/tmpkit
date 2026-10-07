@@ -261,15 +261,17 @@ class TestEdgeCases:
         assert temp_path.exists()
         temp_path.unlink()
 
-    def test_propagate_cleanup_error_when_not_ignored(self, tmp_path: Path) -> None:
+    def test_cleanup_error_suppressed_when_body_error(self, tmp_path: Path) -> None:
+        """Body exceptions take precedence: cleanup errors don't mask them."""
         dest = tmp_path / "output.txt"
         w = atomic_write(dest, mode="w", ignore_cleanup_errors=False)
         w.__enter__()
-        with (
-            patch("tmpkit._atomic.os.unlink", side_effect=OSError("denied")),
-            pytest.raises(OSError, match="denied"),
-        ):
+        temp_path = w.path
+        with patch("tmpkit._atomic.os.unlink", side_effect=OSError("denied")):
             w.__exit__(RuntimeError, RuntimeError("boom"), None)
+        # Unlink failed, so the temp still exists — clean up manually.
+        assert temp_path.exists()
+        temp_path.unlink()
 
     def test_fdopen_failure_cleans_temp(self, tmp_path: Path) -> None:
         dest = tmp_path / "output.txt"
@@ -480,3 +482,130 @@ class TestContextManagerReuse:
         # temp file should still exist
         assert w.path.exists()
         w.path.unlink()
+
+
+class TestKeepParam:
+    """keep=True keeps the temp file and leaves dest untouched."""
+
+    def test_keep_true_keeps_temp(self, tmp_path: Path) -> None:
+        dest = tmp_path / "out.txt"
+        with atomic_write(dest, mode="w", keep=True) as w:
+            w.write("data")
+            temp_path = w.path
+        assert temp_path.exists()
+        assert not dest.exists()
+        temp_path.unlink()
+
+    def test_keep_repr_shows_kept(self, tmp_path: Path) -> None:
+        dest = tmp_path / "out.txt"
+        with atomic_write(dest, mode="w", keep=True) as w:
+            w.write("data")
+        assert "kept" in repr(w)
+        w.path.unlink()
+
+
+class TestDestIsDirectory:
+    """dest pointing at an existing directory raises IsADirectoryError."""
+
+    def test_dest_is_dir_raises(self, tmp_path: Path) -> None:
+        with pytest.raises(IsADirectoryError):
+            atomic_write(tmp_path, mode="w").__enter__()
+
+
+class TestAtomicCleanupHook:
+    """cleanup_hook on atomic_write."""
+
+    def test_hook_called_before_replace(self, tmp_path: Path) -> None:
+        calls: list[Path] = []
+
+        def hook(path: Path) -> None:
+            assert path.exists()
+            calls.append(path)
+
+        dest = tmp_path / "out.txt"
+        with atomic_write(dest, mode="w", cleanup_hook=hook) as w:
+            w.write("data")
+        assert calls == [w.path]
+        assert dest.read_text() == "data"
+
+    def test_hook_called_on_error(self, tmp_path: Path) -> None:
+        calls: list[Path] = []
+        dest = tmp_path / "out.txt"
+        with (
+            pytest.raises(RuntimeError, match="boom"),
+            atomic_write(dest, mode="w", cleanup_hook=calls.append),
+        ):
+            raise RuntimeError("boom")
+        assert len(calls) == 1
+
+    def test_hook_not_called_when_kept(self, tmp_path: Path) -> None:
+        calls: list[Path] = []
+        dest = tmp_path / "out.txt"
+        with atomic_write(dest, mode="w", keep=True, cleanup_hook=calls.append) as w:
+            w.write("data")
+        assert calls == []
+        w.path.unlink()
+
+    def test_hook_error_propagates_after_cleanup(self, tmp_path: Path) -> None:
+        def bad_hook(path: Path) -> None:
+            raise OSError("hook failed")
+
+        dest = tmp_path / "out.txt"
+        w = atomic_write(
+            dest, mode="w", ignore_cleanup_errors=False, cleanup_hook=bad_hook
+        )
+        with pytest.raises(OSError, match="hook failed"), w:
+            w.write("data")
+        assert not w.path.exists()
+
+    def test_hook_error_suppressed_when_body_exception(self, tmp_path: Path) -> None:
+        def bad_hook(path: Path) -> None:
+            raise OSError("hook failed")
+
+        dest = tmp_path / "out.txt"
+        w = atomic_write(
+            dest, mode="w", ignore_cleanup_errors=False, cleanup_hook=bad_hook
+        )
+        with pytest.raises(ValueError, match="body boom"), w:
+            w.write("data")
+            raise ValueError("body boom")
+
+
+class TestAsyncKeepAndHook:
+    """Async atomic_write keep= and cleanup_hook=."""
+
+    async def test_async_keep_true(self, tmp_path: Path) -> None:
+        dest = tmp_path / "out.txt"
+        async with async_atomic_write(dest, mode="w", keep=True) as w:
+            await w.write("data")
+            temp_path = w.path
+        assert temp_path.exists()
+        assert not dest.exists()
+        temp_path.unlink()
+
+    async def test_async_cleanup_hook(self, tmp_path: Path) -> None:
+        calls: list[Path] = []
+        dest = tmp_path / "out.txt"
+        async with async_atomic_write(dest, mode="w", cleanup_hook=calls.append) as w:
+            await w.write("data")
+        assert len(calls) == 1
+        assert dest.read_text() == "data"
+
+
+class TestBeforeEnter:
+    """Access before __enter__ raises RuntimeError, not AssertionError."""
+
+    def test_write_before_enter(self, tmp_path: Path) -> None:
+        w = atomic_write(tmp_path / "out.txt", mode="w")
+        with pytest.raises(RuntimeError, match="before __enter__"):
+            w.write("data")
+
+    def test_path_before_enter(self, tmp_path: Path) -> None:
+        w = atomic_write(tmp_path / "out.txt", mode="w")
+        with pytest.raises(RuntimeError, match="before __enter__"):
+            _ = w.path
+
+    def test_fspath_before_enter(self, tmp_path: Path) -> None:
+        w = atomic_write(tmp_path / "out.txt", mode="w")
+        with pytest.raises(RuntimeError, match="before __enter__"):
+            w.__fspath__()

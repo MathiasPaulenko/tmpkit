@@ -122,16 +122,17 @@ class TestTempFilePrecedence:
 class TestTempFileIgnoreCleanupErrors:
     """ignore_cleanup_errors behavior."""
 
-    def test_ignore_true_swallows_error(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path
-    ) -> None:
+    def test_ignore_true_swallows_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("DEBUG", raising=False)
         monkeypatch.delenv("TMPKIT_DEBUG", raising=False)
-        # Pre-delete the file so os.unlink raises FileNotFoundError
-        with temp_file(ignore_cleanup_errors=True) as f:
-            path = f.path
-        # File already deleted by __exit__ (swallowed), no exception raised
-        assert not path.exists()
+        # Pre-delete the file so __exit__'s os.unlink raises FileNotFoundError
+        import os
+
+        f = temp_file(ignore_cleanup_errors=True)
+        f.__enter__()
+        f.close()  # Windows locks open files; close before unlinking
+        os.unlink(f.path)
+        f.__exit__(None, None, None)  # must not raise
 
     def test_ignore_false_propagates_error(
         self,

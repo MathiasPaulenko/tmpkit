@@ -5,6 +5,7 @@ from __future__ import annotations
 import functools
 import inspect
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any, TypeVar
 
 from tmpkit._async import temp_dir as async_temp_dir
@@ -25,16 +26,25 @@ def temp_dir(
     keep: bool = False,
     keep_on_error: bool = False,
     ignore_cleanup_errors: bool = True,
+    cleanup_hook: Callable[[Path], None] | None = None,
 ) -> Callable[[F], F]:
     """Decorator that provides a fresh temp directory for each call.
 
     By default ``cwd=True`` — the function runs inside the temp dir and
-    the original cwd is restored on exit.
+    the original cwd is restored on exit. Warning: ``os.chdir`` is
+    process-global — do not use ``cwd=True`` from multiple threads or
+    concurrent async tasks.
 
     Works on:
-    - Sync functions: wrapped normally.
+    - Sync functions: wrapped normally. The temp dir path is injected
+      as the first positional argument.
     - Async functions: detected via ``inspect.iscoroutinefunction``.
-    - Test classes: each method gets a fresh temp dir as ``self.tmpdir``.
+    - Test classes: each ``test_*`` method gets a fresh temp dir as
+      ``self.tmpdir``.
+
+    Only plain module-level functions are supported — decorating a method
+    injects the temp path in place of ``self``. For classes, decorate the
+    class itself instead.
 
     Args:
         suffix: Directory name suffix.
@@ -44,6 +54,7 @@ def temp_dir(
         keep: If ``True``, directory is NOT removed.
         keep_on_error: If ``True``, directory is kept only on exception.
         ignore_cleanup_errors: If ``True``, ``OSError`` during cleanup is silently ignored.
+        cleanup_hook: Optional callable invoked with the temp path before cleanup.
     """
 
     def decorator(func_or_cls: F) -> F:
@@ -57,6 +68,7 @@ def temp_dir(
                 keep=keep,
                 keep_on_error=keep_on_error,
                 ignore_cleanup_errors=ignore_cleanup_errors,
+                cleanup_hook=cleanup_hook,
             )
             return func_or_cls
 
@@ -72,6 +84,7 @@ def temp_dir(
                     keep=keep,
                     keep_on_error=keep_on_error,
                     ignore_cleanup_errors=ignore_cleanup_errors,
+                    cleanup_hook=cleanup_hook,
                 ) as tmp:
                     return await func_or_cls(tmp, *args, **kwargs)
 
@@ -87,6 +100,7 @@ def temp_dir(
                 keep=keep,
                 keep_on_error=keep_on_error,
                 ignore_cleanup_errors=ignore_cleanup_errors,
+                cleanup_hook=cleanup_hook,
             ) as tmp:
                 return func_or_cls(tmp, *args, **kwargs)
 
@@ -106,6 +120,7 @@ def temp_file(
     keep: bool = False,
     keep_on_error: bool = False,
     ignore_cleanup_errors: bool = True,
+    cleanup_hook: Callable[[Path], None] | None = None,
 ) -> Callable[[F], F]:
     """Decorator that injects a temp file as the first positional argument.
 
@@ -125,9 +140,16 @@ def temp_file(
         keep: If ``True``, file is NOT deleted.
         keep_on_error: If ``True``, file is kept only on exception.
         ignore_cleanup_errors: If ``True``, ``OSError`` during cleanup is silently ignored.
+        cleanup_hook: Optional callable invoked with the temp path before cleanup.
     """
 
     def decorator(func: F) -> F:
+        if inspect.isclass(func):
+            raise TypeError(
+                "@temp_file() does not support classes — use @temp_dir() "
+                "for test classes or decorate a plain function."
+            )
+
         if inspect.iscoroutinefunction(func):
 
             @functools.wraps(func)
@@ -142,6 +164,7 @@ def temp_file(
                     keep=keep,
                     keep_on_error=keep_on_error,
                     ignore_cleanup_errors=ignore_cleanup_errors,
+                    cleanup_hook=cleanup_hook,
                 ) as f:
                     return await func(f, *args, **kwargs)
 
@@ -159,6 +182,7 @@ def temp_file(
                 keep=keep,
                 keep_on_error=keep_on_error,
                 ignore_cleanup_errors=ignore_cleanup_errors,
+                cleanup_hook=cleanup_hook,
             ) as f:
                 return func(f, *args, **kwargs)
 
@@ -177,17 +201,19 @@ def _decorate_class(
     keep: bool,
     keep_on_error: bool,
     ignore_cleanup_errors: bool,
+    cleanup_hook: Callable[[Path], None] | None,
 ) -> None:
     """Decorate a test class so each test method gets a fresh temp dir.
 
     The temp dir path is available as ``self.tmpdir`` during the test.
-    Each method starting with ``test_`` is wrapped to enter/exit a temp dir
-    context around the original call.
+    Each plain method starting with ``test_`` is wrapped to enter/exit a
+    temp dir context around the original call. ``staticmethod`` and
+    ``classmethod`` members are skipped — they have no ``self``.
     """
     for name, method in list(vars(cls).items()):
         if not name.startswith("test_"):
             continue
-        if not callable(method):
+        if not inspect.isfunction(method):
             continue
 
         if inspect.iscoroutinefunction(method):
@@ -200,6 +226,7 @@ def _decorate_class(
                 keep=keep,
                 keep_on_error=keep_on_error,
                 ignore_cleanup_errors=ignore_cleanup_errors,
+                cleanup_hook=cleanup_hook,
             )
         else:
             wrapped = _wrap_sync_test_method(
@@ -211,6 +238,7 @@ def _decorate_class(
                 keep=keep,
                 keep_on_error=keep_on_error,
                 ignore_cleanup_errors=ignore_cleanup_errors,
+                cleanup_hook=cleanup_hook,
             )
         setattr(cls, name, wrapped)
 
@@ -225,6 +253,7 @@ def _wrap_sync_test_method(
     keep: bool,
     keep_on_error: bool,
     ignore_cleanup_errors: bool,
+    cleanup_hook: Callable[[Path], None] | None,
 ) -> Callable[..., Any]:
     @functools.wraps(method)
     def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
@@ -236,6 +265,7 @@ def _wrap_sync_test_method(
             keep=keep,
             keep_on_error=keep_on_error,
             ignore_cleanup_errors=ignore_cleanup_errors,
+            cleanup_hook=cleanup_hook,
         ) as tmp:
             self.tmpdir = tmp
             return method(self, *args, **kwargs)
@@ -253,6 +283,7 @@ def _wrap_async_test_method(
     keep: bool,
     keep_on_error: bool,
     ignore_cleanup_errors: bool,
+    cleanup_hook: Callable[[Path], None] | None,
 ) -> Callable[..., Any]:
     @functools.wraps(method)
     async def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
@@ -264,6 +295,7 @@ def _wrap_async_test_method(
             keep=keep,
             keep_on_error=keep_on_error,
             ignore_cleanup_errors=ignore_cleanup_errors,
+            cleanup_hook=cleanup_hook,
         ) as tmp:
             self.tmpdir = tmp
             return await method(self, *args, **kwargs)

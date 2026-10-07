@@ -7,11 +7,12 @@ Covers:
 - atomic_write: temp_registry integration
 - temp_file dest: os.replace failure cleans up temp file
 - temp_file dest: shutil.move failure cleans up temp file
-- _safe_unlink / _safe_unlink_temp methods
+- cleanup failures never mask a body exception
 """
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 from unittest.mock import patch
 
@@ -22,7 +23,7 @@ from tmpkit._sync import temp_dir, temp_file
 
 
 @pytest.fixture(autouse=True)
-def _reset_registry() -> None:
+def _reset_registry() -> Iterator[None]:
     """Reset registry state before and after each test."""
     temp_registry.reset()
     yield
@@ -736,8 +737,8 @@ class TestRegistryMarkedOnCleanupFailure:
         monkeypatch.setattr(
             "os.unlink", lambda *a: (_ for _ in ()).throw(OSError("unlink fail"))
         )
-        with pytest.raises(OSError, match="unlink fail"):
-            f.__exit__(ValueError, ValueError("body error"), None)
+        # Unlink failure is suppressed — body exception takes precedence.
+        f.__exit__(ValueError, ValueError("body error"), None)
 
         assert len(temp_registry.active) == 1
         assert len(temp_registry.cleaned) == 0
@@ -758,8 +759,8 @@ class TestRegistryMarkedOnCleanupFailure:
         monkeypatch.setattr(
             "os.unlink", lambda *a: (_ for _ in ()).throw(OSError("unlink fail"))
         )
-        with pytest.raises(OSError, match="unlink fail"):
-            w.__exit__(ValueError, ValueError("body error"), None)
+        # Unlink failure is suppressed — body exception takes precedence.
+        w.__exit__(ValueError, ValueError("body error"), None)
 
         assert len(temp_registry.active) == 1
         assert len(temp_registry.cleaned) == 0
@@ -935,3 +936,45 @@ class TestEnterCleanupFailurePreservesOriginalError:
             temp_file(dir=str(tmp_path), mode="w", content=b"bytes"),
         ):
             pass
+
+
+class TestCleanupDoesNotMaskBodyException:
+    """A body exception is never masked by a cleanup failure."""
+
+    def test_temp_file_close_failure_does_not_mask_body_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import os as os_mod
+
+        original_fdopen = os_mod.fdopen
+
+        def patched_fdopen(fd: int, mode: str = "w+b", **kwargs: object) -> object:
+            f = original_fdopen(fd, mode, **kwargs)
+
+            def failing_close() -> None:
+                os_mod.close(fd)
+                raise OSError("close fail")
+
+            f.close = failing_close  # type: ignore[method-assign]
+            return f
+
+        monkeypatch.setattr("os.fdopen", patched_fdopen)
+        with pytest.raises(ValueError, match="body boom"), temp_file():
+            raise ValueError("body boom")
+
+    def test_atomic_flush_failure_does_not_mask_body_error(
+        self, tmp_path: Path
+    ) -> None:
+        dest = tmp_path / "out.txt"
+        temp_path = None
+        with (
+            patch("os.fsync", side_effect=OSError("fsync fail")),
+            pytest.raises(ValueError, match="body boom"),
+            atomic_write(dest, mode="w") as w,
+        ):
+            w.write("data")
+            temp_path = w.path
+            raise ValueError("body boom")
+        assert temp_path is not None
+        assert not temp_path.exists()
+        assert not dest.exists()

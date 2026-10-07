@@ -7,15 +7,14 @@ import errno
 import os
 import shutil
 import tempfile
-from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from tmpkit._config import _should_keep
 from tmpkit._registry import TempRecord, temp_registry
-from tmpkit._types import StrPath, _validate_prefix_suffix
+from tmpkit._types import CleanupHook, StrPath, _validate_prefix_suffix
 
-CleanupHook = Callable[[Path], None]
+__all__ = ["CleanupHook", "temp_dir", "temp_file"]
 
 
 class _TempFile:
@@ -86,6 +85,8 @@ class _TempFile:
         self._moved = False
         self._user_keep = False
         self._record = None
+        self._path = None
+        self._file = None
         fd, path_str = tempfile.mkstemp(
             suffix=self._suffix,
             prefix=self._prefix,
@@ -132,14 +133,14 @@ class _TempFile:
             or self._user_keep
         )
 
+        # Close errors are captured, not raised immediately, so a body
+        # exception is never masked by a cleanup failure.
+        close_error: OSError | None = None
         if not self._closed and self._file is not None:
             try:
                 self._file.close()
-            except OSError:
-                self._closed = True
-                effective_keep = should_keep or self._keep_on_error
-                self._finalize_keep_or_clean(effective_keep)
-                raise
+            except OSError as e:
+                close_error = e
             self._closed = True
 
         # Call cleanup hook before standard cleanup (even on exception).
@@ -154,12 +155,18 @@ class _TempFile:
                 if not self._ignore_cleanup_errors:
                     hook_error = e
 
+        if close_error is not None and not had_error:
+            effective_keep = should_keep or self._keep_on_error
+            self._finalize_keep_or_clean(effective_keep)
+            raise close_error
+
         if should_keep:
             self._kept = True
             if self._record is not None:
                 temp_registry.mark_kept(self._record)
         elif had_error:
-            self._finalize_clean()
+            with contextlib.suppress(OSError):
+                self._finalize_clean()
         elif self._dest is not None:
             assert self._path is not None
             if self._path == self._dest:
@@ -206,34 +213,37 @@ class _TempFile:
     def _finalize_keep_or_clean(self, effective_keep: bool) -> None:
         """Mark kept or attempt cleanup depending on ``effective_keep``."""
         if effective_keep:
+            self._kept = True
             if self._record is not None:
                 temp_registry.mark_kept(self._record)
         else:
             self._finalize_clean()
 
+    def _require_file(self) -> Any:
+        """Return the open file object or raise if ``__enter__`` hasn't run."""
+        if self._file is None:
+            raise RuntimeError("Cannot perform I/O before __enter__.")
+        return self._file
+
     def read(self, size: int = -1) -> bytes | str:
         if self._closed:
             raise ValueError("I/O operation on closed file.")
-        assert self._file is not None
-        return self._file.read(size)  # type: ignore[no-any-return]
+        return self._require_file().read(size)  # type: ignore[no-any-return]
 
     def write(self, data: bytes | str) -> int:
         if self._closed:
             raise ValueError("I/O operation on closed file.")
-        assert self._file is not None
-        return self._file.write(data)  # type: ignore[no-any-return]
+        return self._require_file().write(data)  # type: ignore[no-any-return]
 
     def seek(self, offset: int, whence: int = 0) -> int:
         if self._closed:
             raise ValueError("I/O operation on closed file.")
-        assert self._file is not None
-        return self._file.seek(offset, whence)  # type: ignore[no-any-return]
+        return self._require_file().seek(offset, whence)  # type: ignore[no-any-return]
 
     def tell(self) -> int:
         if self._closed:
             raise ValueError("I/O operation on closed file.")
-        assert self._file is not None
-        return self._file.tell()  # type: ignore[no-any-return]
+        return self._require_file().tell()  # type: ignore[no-any-return]
 
     def flush(self) -> None:
         if self._closed or self._file is None:
@@ -249,7 +259,8 @@ class _TempFile:
 
     @property
     def path(self) -> Path:
-        assert self._path is not None
+        if self._path is None:
+            raise RuntimeError("Cannot access .path before __enter__.")
         return self._path
 
     def _validate_content(self) -> None:
@@ -269,7 +280,8 @@ class _TempFile:
         self._user_keep = True
 
     def __fspath__(self) -> str:
-        assert self._path is not None
+        if self._path is None:
+            raise RuntimeError("Cannot use temp file as path before __enter__.")
         return str(self._path)
 
     def __repr__(self) -> str:
@@ -311,7 +323,8 @@ def temp_file(
     for cross-filesystem moves). On error, the temp is deleted and ``dest``
     is left untouched.
 
-    Precedence: ``.keep()`` > ``keep=True`` > ``DEBUG=1`` > ``dest=`` move.
+    Precedence: ``.keep()`` > ``keep=True`` > ``DEBUG=1`` > ``keep_on_error``
+    > ``dest=`` move.
 
     Args:
         suffix: File name suffix (e.g. ``".csv"``).
@@ -320,13 +333,15 @@ def temp_file(
         mode: Open mode passed to ``os.fdopen``. Defaults to ``"w+b"``.
         content: Pre-populate file with this content. ``str`` for text modes, ``bytes`` for binary.
         dest: Destination path. On success, temp is moved here.
+            ``dest``'s parent directory must exist at context exit.
         keep: If ``True``, file is NOT deleted on context exit.
         keep_on_error: If ``True``, file is kept only when an exception propagates.
         ignore_cleanup_errors: If ``True``, ``OSError`` during cleanup is silently ignored.
-        cleanup_hook: Optional callable invoked with the temp path before standard cleanup.
-            Called only when the temp is being deleted (not when kept). Hook errors are
-            ignored if ``ignore_cleanup_errors=True``; otherwise they propagate after
-            cleanup, with body exceptions taking precedence.
+        cleanup_hook: Optional callable invoked with the temp path before the temp is
+            removed (deleted, or moved when ``dest`` is set). Not called when the temp
+            is kept. Hook errors are ignored if ``ignore_cleanup_errors=True``;
+            otherwise they propagate after cleanup, with body exceptions taking
+            precedence.
 
     Returns:
         A ``_TempFile`` context manager.
@@ -402,6 +417,7 @@ class _TempDir:
         self._user_keep = False
         self._record = None
         self._cwd_ctx = None
+        self._path = None
         path_str = tempfile.mkdtemp(
             suffix=self._suffix,
             prefix=self._prefix,
@@ -427,11 +443,13 @@ class _TempDir:
         exc_tb: object | None,
     ) -> None:
         self._exited = True
-        cwd_error: OSError | None = None
+        cwd_error: BaseException | None = None
         if self._cwd_ctx is not None:
             try:
                 self._cwd_ctx.__exit__(exc_type, exc_val, exc_tb)
-            except OSError as e:
+            except BaseException as e:
+                # Any failure here is deferred so cleanup still runs —
+                # the temp dir must not leak even if cwd restore dies.
                 cwd_error = e
                 # Best-effort: chdir to system temp so rmtree can succeed
                 # (can't delete cwd on Windows).
@@ -464,10 +482,15 @@ class _TempDir:
             self._kept = True
             if self._record is not None:
                 temp_registry.mark_kept(self._record)
+        elif had_error:
+            with contextlib.suppress(OSError):
+                self._finalize_clean()
         else:
             self._finalize_clean()
 
-        if cwd_error is not None and exc_type is None:
+        if cwd_error is not None and (
+            exc_type is None or not isinstance(cwd_error, OSError)
+        ):
             raise cwd_error
         if hook_error is not None and exc_type is None:
             raise hook_error
@@ -491,7 +514,8 @@ class _TempDir:
 
     @property
     def path(self) -> Path:
-        assert self._path is not None
+        if self._path is None:
+            raise RuntimeError("Cannot access .path before __enter__.")
         return self._path
 
     def keep(self) -> None:
@@ -502,11 +526,13 @@ class _TempDir:
         self._user_keep = True
 
     def __fspath__(self) -> str:
-        assert self._path is not None
+        if self._path is None:
+            raise RuntimeError("Cannot use temp dir as path before __enter__.")
         return str(self._path)
 
     def __truediv__(self, other: str | Path) -> Path:
-        assert self._path is not None
+        if self._path is None:
+            raise RuntimeError("Cannot use temp dir as path before __enter__.")
         return self._path / other
 
     def __repr__(self) -> str:
@@ -542,13 +568,15 @@ def temp_dir(
         prefix: Directory name prefix.
         dir: Parent directory. Defaults to system temp dir.
         cwd: If ``True``, changes working directory to temp dir on ``__enter__``, restores on ``__exit__``.
+            Warning: ``os.chdir`` is process-global — do not use ``cwd=True`` from
+            multiple threads or concurrent async tasks.
         keep: If ``True``, directory is NOT removed on context exit.
         keep_on_error: If ``True``, directory is kept only when an exception propagates.
         ignore_cleanup_errors: If ``True``, ``OSError`` during cleanup is silently ignored.
-        cleanup_hook: Optional callable invoked with the temp path before standard cleanup.
-            Called only when the temp is being deleted (not when kept). Hook errors are
-            ignored if ``ignore_cleanup_errors=True``; otherwise they propagate after
-            cleanup, with body exceptions taking precedence.
+        cleanup_hook: Optional callable invoked with the temp path before the temp is
+            removed. Not called when the temp is kept. Hook errors are ignored if
+            ``ignore_cleanup_errors=True``; otherwise they propagate after cleanup,
+            with body exceptions taking precedence.
 
     Returns:
         A ``_TempDir`` context manager.

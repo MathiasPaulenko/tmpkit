@@ -13,13 +13,14 @@ from typing import Any
 
 from tmpkit._config import _should_keep
 from tmpkit._registry import TempRecord, temp_registry
-from tmpkit._types import StrPath, _validate_prefix_suffix
+from tmpkit._types import CleanupHook, StrPath, _validate_prefix_suffix
 
 
 class _AtomicWriter:
     """Atomic file writer. Writes to a temp file, then atomically replaces dest on success."""
 
     __slots__ = (
+        "_cleanup_hook",
         "_closed",
         "_dest",
         "_encoding",
@@ -27,7 +28,9 @@ class _AtomicWriter:
         "_file",
         "_fsync",
         "_ignore_cleanup_errors",
+        "_keep",
         "_keep_on_error",
+        "_kept",
         "_mode",
         "_newlines",
         "_path",
@@ -47,8 +50,10 @@ class _AtomicWriter:
         prefix: str | None = None,
         suffix: str = ".tmp",
         fsync: bool = True,
+        keep: bool = False,
         keep_on_error: bool = False,
         ignore_cleanup_errors: bool = True,
+        cleanup_hook: CleanupHook | None = None,
     ) -> None:
         self._dest = Path(dest)
         self._mode = mode
@@ -58,13 +63,16 @@ class _AtomicWriter:
         validated_suffix = _validate_prefix_suffix(suffix, "suffix")
         self._suffix = validated_suffix if validated_suffix is not None else ".tmp"
         self._fsync = fsync
+        self._keep = keep
         self._keep_on_error = keep_on_error
         self._ignore_cleanup_errors = ignore_cleanup_errors
+        self._cleanup_hook = cleanup_hook
         self._path: Path | None = None
         self._file: Any = None
         self._closed = False
         self._exited = False
         self._user_keep = False
+        self._kept = False
         self._record: TempRecord | None = None
 
     def __enter__(self) -> _AtomicWriter:
@@ -72,7 +80,12 @@ class _AtomicWriter:
         self._closed = False
         self._exited = False
         self._user_keep = False
+        self._kept = False
         self._record = None
+        self._path = None
+        self._file = None
+        if self._dest.is_dir():
+            raise IsADirectoryError(f"Destination is a directory: {self._dest}")
         dest_parent = self._dest.parent
         try:
             stat_result = os.stat(dest_parent)
@@ -120,56 +133,73 @@ class _AtomicWriter:
         had_error = exc_type is not None
         should_keep = (
             _should_keep(
-                keep=False,
+                keep=self._keep,
                 keep_on_error=self._keep_on_error,
                 had_error=had_error,
             )
             or self._user_keep
         )
 
-        # Close file: flush + fsync + close
+        # Close file: flush + fsync + close. Errors are captured so a body
+        # exception is never masked by a cleanup failure.
+        flush_error: OSError | None = None
         if not self._closed and self._file is not None:
             try:
                 self._file.flush()
                 if self._fsync:
                     assert self._path is not None
                     os.fsync(self._file.fileno())
-            except OSError:
-                with contextlib.suppress(OSError):
-                    self._file.close()
-                self._closed = True
-                effective_keep = should_keep or self._keep_on_error
-                self._finalize_keep_or_clean(effective_keep)
-                raise
+            except OSError as e:
+                flush_error = e
             with contextlib.suppress(OSError):
                 self._file.close()
             self._closed = True
 
+        # Call cleanup hook before the temp is removed (deleted or moved).
+        # If the hook fails, capture the error and proceed so the temp
+        # never leaks. Re-raise after cleanup if needed.
+        hook_error: BaseException | None = None
+        if self._cleanup_hook is not None and not should_keep:
+            assert self._path is not None
+            try:
+                self._cleanup_hook(self._path)
+            except Exception as e:
+                if not self._ignore_cleanup_errors:
+                    hook_error = e
+
+        if flush_error is not None and not had_error:
+            effective_keep = should_keep or self._keep_on_error
+            self._finalize_keep_or_clean(effective_keep)
+            raise flush_error
+
         if should_keep:
+            self._kept = True
             if self._record is not None:
                 temp_registry.mark_kept(self._record)
-            return
-
-        if had_error:
-            self._finalize_clean()
-            return
-
-        # Success: atomic replace
-        assert self._path is not None
-        try:
-            os.replace(self._path, self._dest)
-        except OSError as exc:
-            if exc.errno == errno.EXDEV:
-                try:
-                    shutil.move(self._path, self._dest)
-                except OSError:
+        elif had_error:
+            with contextlib.suppress(OSError):
+                self._finalize_clean()
+        else:
+            # Success: atomic replace
+            assert self._path is not None
+            try:
+                os.replace(self._path, self._dest)
+            except OSError as exc:
+                if exc.errno == errno.EXDEV:
+                    try:
+                        shutil.move(self._path, self._dest)
+                    except OSError:
+                        self._finalize_clean()
+                        raise
+                else:
                     self._finalize_clean()
                     raise
-            else:
-                self._finalize_clean()
-                raise
-        if self._record is not None:
-            temp_registry.mark_cleaned(self._record)
+            self._fsync_dir()
+            if self._record is not None:
+                temp_registry.mark_cleaned(self._record)
+
+        if hook_error is not None and exc_type is None:
+            raise hook_error
 
     def _finalize_clean(self) -> None:
         """Unlink the temp file and mark the registry record as cleaned.
@@ -190,15 +220,37 @@ class _AtomicWriter:
     def _finalize_keep_or_clean(self, effective_keep: bool) -> None:
         """Mark kept or attempt cleanup depending on ``effective_keep``."""
         if effective_keep:
+            self._kept = True
             if self._record is not None:
                 temp_registry.mark_kept(self._record)
         else:
             self._finalize_clean()
 
+    def _fsync_dir(self) -> None:
+        """Best-effort fsync of the destination directory.
+
+        ``os.replace`` is atomic but the rename itself is only durable
+        once the parent directory's metadata hits disk. This is a
+        no-op where directory fsync is unsupported (e.g. Windows).
+        """
+        try:
+            dir_fd = os.open(
+                str(self._dest.parent), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+            )
+        except OSError:
+            return
+        try:
+            os.fsync(dir_fd)
+        except OSError:
+            pass
+        finally:
+            os.close(dir_fd)
+
     def write(self, data: bytes | str) -> int:
         if self._closed:
             raise ValueError("I/O operation on closed file.")
-        assert self._file is not None
+        if self._file is None:
+            raise RuntimeError("Cannot perform I/O before __enter__.")
         return self._file.write(data)  # type: ignore[no-any-return]
 
     def flush(self) -> None:
@@ -215,7 +267,8 @@ class _AtomicWriter:
 
     @property
     def path(self) -> Path:
-        assert self._path is not None
+        if self._path is None:
+            raise RuntimeError("Cannot access .path before __enter__.")
         return self._path
 
     @property
@@ -230,12 +283,15 @@ class _AtomicWriter:
         self._user_keep = True
 
     def __fspath__(self) -> str:
-        assert self._path is not None
+        if self._path is None:
+            raise RuntimeError("Cannot use temp file as path before __enter__.")
         return str(self._path)
 
     def __repr__(self) -> str:
         path_str = repr(self._path) if self._path else "None"
-        if self._closed:
+        if self._kept:
+            state = "kept"
+        elif self._closed:
             state = "closed"
         elif self._file is not None:
             state = "open"
@@ -253,14 +309,19 @@ def atomic_write(
     prefix: str | None = None,
     suffix: str = ".tmp",
     fsync: bool = True,
+    keep: bool = False,
     keep_on_error: bool = False,
     ignore_cleanup_errors: bool = True,
+    cleanup_hook: CleanupHook | None = None,
 ) -> _AtomicWriter:
     """Create an atomic file writer context manager.
 
     Writes to a temp file in ``dest.parent``, then atomically replaces
     ``dest`` via ``os.replace()`` on success. On error, the temp file is
     deleted and ``dest`` is left untouched.
+
+    Note: ``DEBUG=1``/``TMPKIT_DEBUG=1`` and keep signals keep the temp file
+    and skip the replace — ``dest`` is left untouched even on success.
 
     Args:
         dest: Final destination path.
@@ -270,8 +331,13 @@ def atomic_write(
         prefix: Temp file name prefix.
         suffix: Temp file name suffix. Defaults to ``".tmp"``.
         fsync: If ``True``, call ``os.fsync()`` before closing.
+        keep: If ``True``, temp file is NOT deleted and ``dest`` is untouched.
         keep_on_error: If ``True``, keep temp file on exception (don't delete).
         ignore_cleanup_errors: If ``True``, ``OSError`` during cleanup is silently ignored.
+        cleanup_hook: Optional callable invoked with the temp path before the temp is
+            removed (deleted, or moved on success). Not called when the temp is kept.
+            Hook errors are ignored if ``ignore_cleanup_errors=True``; otherwise they
+            propagate after cleanup, with body exceptions taking precedence.
 
     Returns:
         An ``_AtomicWriter`` context manager.
@@ -284,6 +350,8 @@ def atomic_write(
         prefix=prefix,
         suffix=suffix,
         fsync=fsync,
+        keep=keep,
         keep_on_error=keep_on_error,
         ignore_cleanup_errors=ignore_cleanup_errors,
+        cleanup_hook=cleanup_hook,
     )

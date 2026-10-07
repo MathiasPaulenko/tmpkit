@@ -441,3 +441,37 @@ class TestContextManagerReuse:
         assert path1 != path2
         assert not path1.exists()
         assert not path2.exists()
+
+
+class TestBeforeEnter:
+    """I/O and path access before __enter__ raise RuntimeError."""
+
+    def test_read_before_enter(self) -> None:
+        f = temp_file()
+        with pytest.raises(RuntimeError, match="before __enter__"):
+            f.read()
+
+    def test_write_before_enter(self) -> None:
+        f = temp_file()
+        with pytest.raises(RuntimeError, match="before __enter__"):
+            f.write(b"x")
+
+    def test_seek_before_enter(self) -> None:
+        f = temp_file()
+        with pytest.raises(RuntimeError, match="before __enter__"):
+            f.seek(0)
+
+    def test_tell_before_enter(self) -> None:
+        f = temp_file()
+        with pytest.raises(RuntimeError, match="before __enter__"):
+            f.tell()
+
+    def test_path_before_enter(self) -> None:
+        f = temp_file()
+        with pytest.raises(RuntimeError, match="before __enter__"):
+            _ = f.path
+
+    def test_fspath_before_enter(self) -> None:
+        f = temp_file()
+        with pytest.raises(RuntimeError, match="before __enter__"):
+            f.__fspath__()

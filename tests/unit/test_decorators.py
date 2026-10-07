@@ -332,3 +332,50 @@ class TestTempFileDecoratorAsync:
 
         with pytest.raises(RuntimeError, match="async file boom"):
             await my_func()
+
+
+class TestTempFileDecoratorOnClass:
+    """@temp_file() on a class raises TypeError instead of silent breakage."""
+
+    def test_class_raises_type_error(self) -> None:
+        with pytest.raises(TypeError, match="does not support classes"):
+
+            @temp_file_decorator()
+            class MyClass:
+                pass
+
+
+class TestStaticmethodSkipped:
+    """test_* staticmethods have no self — they must not be wrapped."""
+
+    def test_staticmethod_not_wrapped(self) -> None:
+        @temp_dir_decorator()
+        class MyClass:
+            test_static = staticmethod(lambda: "ok")
+
+        obj = MyClass()
+        assert obj.test_static() == "ok"
+
+
+class TestDecoratorCleanupHook:
+    """cleanup_hook passes through both decorators."""
+
+    def test_temp_dir_hook_called(self) -> None:
+        calls: list[Path] = []
+
+        @temp_dir_decorator(cleanup_hook=calls.append)
+        def my_func(tmp: Path) -> None:
+            pass
+
+        my_func()
+        assert len(calls) == 1
+
+    def test_temp_file_hook_called(self) -> None:
+        calls: list[Path] = []
+
+        @temp_file_decorator(cleanup_hook=calls.append)
+        def my_func(f: object) -> None:
+            pass
+
+        my_func()
+        assert len(calls) == 1

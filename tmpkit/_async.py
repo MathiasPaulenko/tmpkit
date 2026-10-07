@@ -6,8 +6,8 @@ import asyncio
 from pathlib import Path
 
 from tmpkit._atomic import _AtomicWriter
-from tmpkit._sync import CleanupHook, _TempDir, _TempFile
-from tmpkit._types import StrPath
+from tmpkit._sync import _TempDir, _TempFile
+from tmpkit._types import CleanupHook, StrPath
 
 
 class _AsyncTempFile:
@@ -90,13 +90,15 @@ def temp_file(
         mode: Open mode passed to ``os.fdopen``. Defaults to ``"w+b"``.
         content: Pre-populate file with this content. ``str`` for text modes, ``bytes`` for binary.
         dest: Destination path. On success, temp is moved here.
+            ``dest``'s parent directory must exist at context exit.
         keep: If ``True``, file is NOT deleted on context exit.
         keep_on_error: If ``True``, file is kept only when an exception propagates.
         ignore_cleanup_errors: If ``True``, ``OSError`` during cleanup is silently ignored.
-        cleanup_hook: Optional callable invoked with the temp path before standard cleanup.
-            Called only when the temp is being deleted (not when kept). Hook errors are
-            ignored if ``ignore_cleanup_errors=True``; otherwise they propagate after
-            cleanup, with body exceptions taking precedence.
+        cleanup_hook: Optional callable invoked with the temp path before the temp is
+            removed (deleted, or moved when ``dest`` is set). Not called when the temp
+            is kept. Hook errors are ignored if ``ignore_cleanup_errors=True``;
+            otherwise they propagate after cleanup, with body exceptions taking
+            precedence.
 
     Returns:
         An ``_AsyncTempFile`` context manager.
@@ -174,13 +176,15 @@ def temp_dir(
         prefix: Directory name prefix.
         dir: Parent directory. Defaults to system temp dir.
         cwd: If ``True``, changes working directory to temp dir on ``__aenter__``, restores on ``__aexit__``.
+            Warning: ``os.chdir`` is process-global — do not use ``cwd=True`` from
+            multiple threads or concurrent async tasks.
         keep: If ``True``, directory is NOT removed on context exit.
         keep_on_error: If ``True``, directory is kept only when an exception propagates.
         ignore_cleanup_errors: If ``True``, ``OSError`` during cleanup is silently ignored.
-        cleanup_hook: Optional callable invoked with the temp path before standard cleanup.
-            Called only when the temp is being deleted (not when kept). Hook errors are
-            ignored if ``ignore_cleanup_errors=True``; otherwise they propagate after
-            cleanup, with body exceptions taking precedence.
+        cleanup_hook: Optional callable invoked with the temp path before the temp is
+            removed. Not called when the temp is kept. Hook errors are ignored if
+            ``ignore_cleanup_errors=True``; otherwise they propagate after cleanup,
+            with body exceptions taking precedence.
 
     Returns:
         An ``_AsyncTempDir`` context manager.
@@ -255,14 +259,19 @@ def atomic_write(
     prefix: str | None = None,
     suffix: str = ".tmp",
     fsync: bool = True,
+    keep: bool = False,
     keep_on_error: bool = False,
     ignore_cleanup_errors: bool = True,
+    cleanup_hook: CleanupHook | None = None,
 ) -> _AsyncAtomicWriter:
     """Create an async atomic file writer context manager.
 
     Writes to a temp file in ``dest.parent``, then atomically replaces
     ``dest`` via ``os.replace()`` on success. On error, the temp file is
     deleted and ``dest`` is left untouched.
+
+    Note: ``DEBUG=1``/``TMPKIT_DEBUG=1`` and keep signals keep the temp file
+    and skip the replace — ``dest`` is left untouched even on success.
 
     Args:
         dest: Final destination path.
@@ -272,8 +281,11 @@ def atomic_write(
         prefix: Temp file name prefix.
         suffix: Temp file name suffix. Defaults to ``".tmp"``.
         fsync: If ``True``, call ``os.fsync()`` before closing.
+        keep: If ``True``, temp file is NOT deleted and ``dest`` is untouched.
         keep_on_error: If ``True``, keep temp file on exception (don't delete).
         ignore_cleanup_errors: If ``True``, ``OSError`` during cleanup is silently ignored.
+        cleanup_hook: Optional callable invoked with the temp path before the temp is
+            removed (deleted, or moved on success). Not called when the temp is kept.
 
     Returns:
         An ``_AsyncAtomicWriter`` context manager.
@@ -287,7 +299,9 @@ def atomic_write(
             prefix=prefix,
             suffix=suffix,
             fsync=fsync,
+            keep=keep,
             keep_on_error=keep_on_error,
             ignore_cleanup_errors=ignore_cleanup_errors,
+            cleanup_hook=cleanup_hook,
         )
     )

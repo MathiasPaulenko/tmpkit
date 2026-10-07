@@ -227,3 +227,47 @@ class TestContextManagerReuse:
         import shutil
 
         shutil.rmtree(d)
+
+
+class TestBeforeEnter:
+    """Path access before __enter__ raises RuntimeError."""
+
+    def test_path_before_enter(self) -> None:
+        td = temp_dir()
+        with pytest.raises(RuntimeError, match="before __enter__"):
+            _ = td.path
+
+    def test_fspath_before_enter(self) -> None:
+        td = temp_dir()
+        with pytest.raises(RuntimeError, match="before __enter__"):
+            td.__fspath__()
+
+    def test_truediv_before_enter(self) -> None:
+        td = temp_dir()
+        with pytest.raises(RuntimeError, match="before __enter__"):
+            td / "x"
+
+
+class TestCwdRestoreNonOSError:
+    """A non-OSError from cwd restore still cleans up the dir."""
+
+    def test_non_oserror_restore_still_cleans(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        class WeirdChdir:
+            def __init__(self, path: Path) -> None:
+                self._path = path
+
+            def __enter__(self) -> Path:
+                return self._path
+
+            def __exit__(self, *args: object) -> None:
+                raise RuntimeError("weird restore failure")
+
+        monkeypatch.setattr("tmpkit._sync.contextlib.chdir", lambda p: WeirdChdir(p))
+
+        td = temp_dir(cwd=True, dir=str(tmp_path))
+        with pytest.raises(RuntimeError, match="weird restore failure"), td:
+            pass
+
+        assert not td.path.exists()

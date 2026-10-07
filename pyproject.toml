@@ -30,8 +30,8 @@ dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
     "pytest-cov>=5.0",
-    "ruff>=0.6.0",
-    "mypy>=1.11.0",
+    "ruff>=0.16.0",
+    "mypy>=2.3.0",
     "build>=1.0",
 ]
 
@@ -79,6 +79,25 @@ warn_redundant_casts = true
 warn_unused_ignores = true
 warn_no_return = true
 warn_unreachable = true
+
+# Tests exercise decorator-injected args and private internals; strict
+# signature/attr checks don't apply there.
+[[tool.mypy.overrides]]
+module = "tests.*"
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+warn_return_any = false
+warn_unused_ignores = false
+disable_error_code = [
+    "arg-type",
+    "attr-defined",
+    "call-arg",
+    "call-overload",
+    "comparison-overlap",
+    "func-returns-value",
+    "method-assign",
+    "union-attr",
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

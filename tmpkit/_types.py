@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from pathlib import Path
 from typing import Protocol, TypeAlias, runtime_checkable
 
 StrPath: TypeAlias = str | Path
+CleanupHook: TypeAlias = Callable[[Path], None]
 
 
 def _validate_prefix_suffix(value: str | None, name: str) -> str | None:

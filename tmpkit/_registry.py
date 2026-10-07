@@ -35,6 +35,10 @@ class TempRegistry:
 
     Disabled by default for zero overhead. Enable via ``enable()`` or
     setting ``TMPKIT_REGISTRY=1`` environment variable at import time.
+
+    Records accumulate for the lifetime of the process — call
+    ``clear_history()`` periodically (or ``reset()``) in long-running
+    processes to bound memory usage.
     """
 
     __slots__ = ("_enabled", "_lock", "_records")
