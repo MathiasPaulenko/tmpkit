@@ -8,6 +8,7 @@ registry cleanup of dirs/symlinks, and generator/class decorator lifecycles.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 import unittest.mock
@@ -820,9 +821,7 @@ class TestInterruptDuringClose:
             w.__exit__(None, None, None)
         assert not tmp.exists()
 
-    def test_atomic_flush_interrupt_wins_over_body_error(
-        self, tmp_path: Path
-    ) -> None:
+    def test_atomic_flush_interrupt_wins_over_body_error(self, tmp_path: Path) -> None:
         w = atomic_write(tmp_path / "out.txt", mode="w", fsync=False)
         w.__enter__()
         tmp = w.path
@@ -849,10 +848,9 @@ def test_atomic_close_interrupt_outranks_flush_error(tmp_path: Path) -> None:
     )
 
     def close_then_raise() -> None:
-        try:
-            real_close()  # still triggers the mocked flush — ignore it
-        except OSError:
-            pass
+        # real_close re-triggers the mocked flush — ignore it
+        with contextlib.suppress(OSError):
+            real_close()
         raise KeyboardInterrupt
 
     w._file.close = close_then_raise  # type: ignore[method-assign]
