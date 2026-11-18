@@ -10,7 +10,7 @@ from tmpkit._registry import TempRecord, TempRegistry, temp_registry
 from tmpkit._sync import temp_dir, temp_file
 from tmpkit._types import CleanupHook, StrPath, TempFileLike
 
-__version__ = "1.1.0"
+__version__ = "1.1.1"
 
 __all__ = [
     "CleanupHook",
