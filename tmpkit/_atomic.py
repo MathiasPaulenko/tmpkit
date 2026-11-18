@@ -13,7 +13,12 @@ from typing import Any
 
 from tmpkit._config import _should_keep
 from tmpkit._registry import TempRecord, temp_registry
-from tmpkit._types import CleanupHook, StrPath, _validate_prefix_suffix
+from tmpkit._types import (
+    CleanupHook,
+    StrPath,
+    _merge_deferred,
+    _validate_prefix_suffix,
+)
 
 
 class _AtomicWriter:
@@ -23,6 +28,8 @@ class _AtomicWriter:
         "_cleanup_hook",
         "_closed",
         "_dest",
+        "_dest_entered",
+        "_dest_resolved",
         "_encoding",
         "_exited",
         "_file",
@@ -55,7 +62,7 @@ class _AtomicWriter:
         ignore_cleanup_errors: bool = True,
         cleanup_hook: CleanupHook | None = None,
     ) -> None:
-        self._dest = Path(dest)
+        self._dest: Path | None = Path(dest)
         self._mode = mode
         self._encoding = encoding
         self._newlines = newline
@@ -74,8 +81,14 @@ class _AtomicWriter:
         self._user_keep = False
         self._kept = False
         self._record: TempRecord | None = None
+        self._dest_resolved: Path | None = None
+        self._dest_entered: Path | None = None
 
     def __enter__(self) -> _AtomicWriter:
+        if self._path is not None and not self._exited:
+            raise RuntimeError(
+                "Cannot re-enter an active atomic_write context manager."
+            )
         # Reset state for re-entry (context managers can be reused).
         self._closed = False
         self._exited = False
@@ -84,9 +97,16 @@ class _AtomicWriter:
         self._record = None
         self._path = None
         self._file = None
-        if self._dest.is_dir():
+        # Resolve dest once, against the enter-time cwd: os.replace() at exit
+        # would otherwise resolve a relative dest against whatever cwd the
+        # process has then, which may differ (e.g. cwd=True temp dirs).
+        assert self._dest is not None
+        dest_resolved = Path(os.path.abspath(self._dest))
+        self._dest_resolved = dest_resolved
+        self._dest_entered = self._dest
+        if dest_resolved.is_dir():
             raise IsADirectoryError(f"Destination is a directory: {self._dest}")
-        dest_parent = self._dest.parent
+        dest_parent = dest_resolved.parent
         try:
             stat_result = os.stat(dest_parent)
         except FileNotFoundError:
@@ -103,7 +123,7 @@ class _AtomicWriter:
             prefix=self._prefix,
             dir=str(dest_parent),
         )
-        self._path = Path(path_str)
+        self._path = Path(os.path.abspath(path_str))
 
         open_kwargs: dict[str, Any] = {}
         if "b" not in self._mode:
@@ -119,6 +139,7 @@ class _AtomicWriter:
                 os.close(fd)
             with contextlib.suppress(OSError):
                 os.unlink(path_str)
+            self._path = None
             raise
         self._record = temp_registry.register(self._path, "file")
         return self
@@ -129,7 +150,8 @@ class _AtomicWriter:
         exc_val: BaseException | None,
         exc_tb: object | None,
     ) -> None:
-        self._exited = True
+        if self._path is None:
+            return  # never entered (or enter failed) — nothing to finalize
         had_error = exc_type is not None
         should_keep = (
             _should_keep(
@@ -142,35 +164,37 @@ class _AtomicWriter:
 
         # Close file: flush + fsync + close. Errors are captured so a body
         # exception is never masked by a cleanup failure.
-        flush_error: OSError | None = None
-        if not self._closed and self._file is not None:
-            try:
-                self._file.flush()
-                if self._fsync:
-                    assert self._path is not None
-                    os.fsync(self._file.fileno())
-            except OSError as e:
-                flush_error = e
-            with contextlib.suppress(OSError):
-                self._file.close()
-            self._closed = True
+        flush_error = self._close_file()
 
         # Call cleanup hook before the temp is removed (deleted or moved).
         # If the hook fails, capture the error and proceed so the temp
         # never leaks. Re-raise after cleanup if needed.
+        # The hook is skipped whenever the temp will be kept — including a
+        # flush error triggering keep_on_error.
         hook_error: BaseException | None = None
-        if self._cleanup_hook is not None and not should_keep:
-            assert self._path is not None
+        will_keep = should_keep or (flush_error is not None and self._keep_on_error)
+        if self._cleanup_hook is not None and not will_keep:
             try:
                 self._cleanup_hook(self._path)
-            except Exception as e:
-                if not self._ignore_cleanup_errors:
+            except BaseException as e:
+                # Defer so the temp still gets cleaned. BaseExceptions
+                # (KeyboardInterrupt etc.) are always re-raised later —
+                # ignore_cleanup_errors only silences normal exceptions.
+                if not self._ignore_cleanup_errors or not isinstance(e, Exception):
                     hook_error = e
 
-        if flush_error is not None and not had_error:
+        # _exited is set only now so a hook can still call .keep() —
+        # after this point keep() correctly raises "after __exit__".
+        self._exited = True
+        should_keep = should_keep or self._user_keep
+
+        if flush_error is not None and (
+            not had_error or not isinstance(flush_error, Exception)
+        ):
             effective_keep = should_keep or self._keep_on_error
-            self._finalize_keep_or_clean(effective_keep)
-            raise flush_error
+            with contextlib.suppress(OSError):
+                self._finalize_keep_or_clean(effective_keep)
+            raise _merge_deferred(flush_error, hook_error)
 
         if should_keep:
             self._kept = True
@@ -181,20 +205,45 @@ class _AtomicWriter:
                 self._finalize_clean()
         else:
             # Success: atomic replace
-            assert self._path is not None
-            try:
-                os.replace(self._path, self._dest)
-            except OSError as exc:
-                if exc.errno == errno.EXDEV:
-                    try:
-                        shutil.move(self._path, self._dest)
-                    except OSError:
+            if self._dest is None:
+                # _dest was cleared after __enter__ — just drop the temp.
+                self._finalize_clean()
+            else:
+                dest = self._dest_resolved
+                if self._dest != self._dest_entered:
+                    # _dest was (re)assigned after __enter__ — resolve it now.
+                    dest = Path(os.path.abspath(self._dest))
+                assert dest is not None
+                self._dest_resolved = dest
+                if dest.is_dir():
+                    # TOCTOU: dest may have become a directory since __enter__.
+                    # Also prevents the EXDEV fallback from moving the temp
+                    # *inside* the directory.
+                    with contextlib.suppress(OSError):
                         self._finalize_clean()
-                        raise
-                else:
+                    raise _merge_deferred(
+                        IsADirectoryError(f"Destination is a directory: {self._dest}"),
+                        hook_error,
+                    )
+                replace_error: OSError | None = None
+                try:
+                    os.replace(self._path, dest)
+                except OSError as exc:
+                    if exc.errno == errno.EXDEV:
+                        try:
+                            shutil.move(self._path, dest)
+                        except OSError as move_exc:
+                            self._finalize_clean()
+                            raise _merge_deferred(move_exc, hook_error) from exc
+                    else:
+                        replace_error = exc
+                # Raised outside the except clause: _merge_deferred
+                # already chains the deferred hook error as __cause__ —
+                # `from exc` would clobber it.
+                if replace_error is not None:
                     self._finalize_clean()
-                    raise
-            self._fsync_dir()
+                    raise _merge_deferred(replace_error, hook_error)
+                self._fsync_dir()
             if self._record is not None:
                 temp_registry.mark_cleaned(self._record)
 
@@ -233,9 +282,12 @@ class _AtomicWriter:
         once the parent directory's metadata hits disk. This is a
         no-op where directory fsync is unsupported (e.g. Windows).
         """
+        if self._dest_resolved is None:
+            return
         try:
             dir_fd = os.open(
-                str(self._dest.parent), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+                str(self._dest_resolved.parent),
+                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
             )
         except OSError:
             return
@@ -258,12 +310,47 @@ class _AtomicWriter:
             return
         self._file.flush()
 
-    def close(self) -> None:
-        if self._closed:
-            return
-        if self._file is not None:
+    def _close_file(self) -> BaseException | None:
+        """Flush, fsync (if enabled) and close the temp file once.
+
+        Returns the first error raised while flushing/fsyncing — the
+        caller decides whether to propagate it. A ``ValueError`` from flush
+        means the file was already closed underneath, which is not an error.
+        ``_closed`` is always set, so ``__exit__`` never retries the close.
+        """
+        if self._closed or self._file is None:
+            return None
+        error: BaseException | None = None
+        try:
+            self._file.flush()
+            if self._fsync:
+                os.fsync(self._file.fileno())
+        except ValueError:
+            pass
+        except BaseException as e:
+            error = e
+        try:
+            # close() re-flushes internally — errors here cannot lose data
+            # once flush+fsync already ran, so they are suppressed and the
+            # earlier flush error (if any) is what gets reported. Only
+            # interrupts (KeyboardInterrupt etc.) still propagate.
             self._file.close()
+        except Exception:
+            pass
+        except BaseException as e:
+            # An interrupt outranks any earlier Exception-class flush
+            # error — never swallow a KeyboardInterrupt.
+            if error is None or isinstance(error, Exception):
+                error = e
+        finally:
+            self._closed = True
+        return error
+
+    def close(self) -> None:
+        error = self._close_file()
         self._closed = True
+        if error is not None:
+            raise error
 
     @property
     def path(self) -> Path:
@@ -273,6 +360,8 @@ class _AtomicWriter:
 
     @property
     def dest(self) -> Path:
+        if self._dest is None:
+            raise RuntimeError("Cannot access .dest — it was cleared.")
         return self._dest
 
     def keep(self) -> None:

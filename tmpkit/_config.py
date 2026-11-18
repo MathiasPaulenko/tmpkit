@@ -11,9 +11,9 @@ def _debug_enabled() -> bool:
     TMPKIT_DEBUG takes precedence over DEBUG.
     Returns True only if the resolved value is exactly "1".
     """
-    value = os.environ.get("TMPKIT_DEBUG")
-    if value is None:
-        value = os.environ.get("DEBUG")
+    # `or` (not is-None): an empty TMPKIT_DEBUG counts as unset so it
+    # doesn't shadow a real DEBUG=1.
+    value = os.environ.get("TMPKIT_DEBUG") or os.environ.get("DEBUG")
     return value == "1"
 
 

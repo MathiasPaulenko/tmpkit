@@ -7,8 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-10-31
+
+### Added
+
+- `TempRegistry`, `StrPath`, `CleanupHook` and `__version__` are now
+  exported from `tmpkit`.
+
 ### Fixed
 
+- Re-entering an active `temp_file()`/`temp_dir()`/`atomic_write()` context
+  now raises `RuntimeError` instead of leaking the previous temp.
+- `atomic_write().close()` inside the block no longer skips flush/fsync —
+  durability was silently lost.
+- `prefix`/`suffix` now reject NUL bytes and, on Windows, characters
+  invalid in filenames (`< > : " | ? *`) — `:` previously created an NTFS
+  alternate data stream and orphaned the base file.
+- Temp paths and `dest` are resolved against the enter-time cwd — a cwd
+  change between `__enter__`/`__exit__` no longer moves or deletes the
+  wrong file.
+- A `dest` that is a directory raises `IsADirectoryError` and cleans the
+  temp (the EXDEV fallback could move the temp *inside* the directory).
+- `temp_registry.cleanup_all()` detects broken symlinks (`lexists`),
+  dispatches on the real on-disk type, and no longer holds the lock during
+  filesystem deletion — failed deletes release the record for retry.
+- `cleanup_hook` errors are deferred until after cleanup and chained via
+  `__cause__`; non-`Exception` errors (KeyboardInterrupt, SystemExit)
+  always propagate and hooks may call `.keep()`.
+- `@temp_dir()`/`@temp_file()` on generators and async generators keep the
+  temp alive through iteration and close it deterministically; generator
+  and async-generator `test_*` methods in decorated classes are supported,
+  inherited `test_*` methods are wrapped, and re-decorating a function
+  raises `TypeError` instead of double-injecting the temp argument.
+- `close()`/flush interrupts (e.g. KeyboardInterrupt) propagate after
+  cleanup instead of leaking the temp file.
+- `TMPKIT_DEBUG=""` no longer shadows a real `DEBUG=1`.
+- `__exit__` before `__enter__` is a safe no-op.
 - Error-path tests no longer close raw fds underneath live file objects —
   GC finalization could close an fd number the OS had already reissued to
   a different temp file, producing flaky `EBADF` failures (seen in CI on

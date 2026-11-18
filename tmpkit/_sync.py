@@ -12,7 +12,12 @@ from typing import Any
 
 from tmpkit._config import _should_keep
 from tmpkit._registry import TempRecord, temp_registry
-from tmpkit._types import CleanupHook, StrPath, _validate_prefix_suffix
+from tmpkit._types import (
+    CleanupHook,
+    StrPath,
+    _merge_deferred,
+    _validate_prefix_suffix,
+)
 
 __all__ = ["CleanupHook", "temp_dir", "temp_file"]
 
@@ -26,6 +31,8 @@ class _TempFile:
         "_content",
         "_deleted",
         "_dest",
+        "_dest_entered",
+        "_dest_resolved",
         "_dir",
         "_exited",
         "_file",
@@ -62,6 +69,8 @@ class _TempFile:
         self._mode = mode
         self._content = content
         self._dest = Path(dest) if dest is not None else None
+        self._dest_entered: Path | None = None
+        self._dest_resolved: Path | None = None
         self._keep = keep
         self._keep_on_error = keep_on_error
         self._ignore_cleanup_errors = ignore_cleanup_errors
@@ -77,6 +86,8 @@ class _TempFile:
         self._record: TempRecord | None = None
 
     def __enter__(self) -> _TempFile:
+        if self._path is not None and not self._exited:
+            raise RuntimeError("Cannot re-enter an active temp_file context manager.")
         # Reset state for re-entry (context managers can be reused).
         self._closed = False
         self._exited = False
@@ -87,12 +98,22 @@ class _TempFile:
         self._record = None
         self._path = None
         self._file = None
+        # Resolve dest once, against the enter-time cwd: os.replace() at exit
+        # would otherwise resolve a relative dest against whatever cwd the
+        # process has then, which may differ (e.g. cwd=True temp dirs).
+        self._dest_entered = self._dest
+        self._dest_resolved = (
+            Path(os.path.abspath(self._dest)) if self._dest is not None else None
+        )
         fd, path_str = tempfile.mkstemp(
             suffix=self._suffix,
             prefix=self._prefix,
             dir=self._dir,
         )
-        self._path = Path(path_str)
+        # abspath: a relative dir= makes mkstemp return a relative path —
+        # without this, every later unlink/replace resolves it against
+        # whatever cwd exists at __exit__ time.
+        self._path = Path(os.path.abspath(path_str))
         try:
             self._file = os.fdopen(fd, mode=self._mode)
         except Exception:
@@ -100,6 +121,7 @@ class _TempFile:
                 os.close(fd)
             with contextlib.suppress(OSError):
                 os.unlink(path_str)
+            self._path = None
             raise
         try:
             if self._content is not None:
@@ -112,6 +134,7 @@ class _TempFile:
             self._closed = True
             with contextlib.suppress(OSError):
                 os.unlink(path_str)
+            self._path = None
             raise
         self._record = temp_registry.register(self._path, "file")
         return self
@@ -122,7 +145,8 @@ class _TempFile:
         exc_val: BaseException | None,
         exc_tb: object | None,
     ) -> None:
-        self._exited = True
+        if self._path is None:
+            return  # never entered (or enter failed) — nothing to finalize
         had_error = exc_type is not None
         should_keep = (
             _should_keep(
@@ -133,32 +157,44 @@ class _TempFile:
             or self._user_keep
         )
 
-        # Close errors are captured, not raised immediately, so a body
-        # exception is never masked by a cleanup failure.
-        close_error: OSError | None = None
-        if not self._closed and self._file is not None:
-            try:
-                self._file.close()
-            except OSError as e:
-                close_error = e
-            self._closed = True
+        # Close errors are captured, not raised immediately, so cleanup
+        # always runs. A non-Exception close error (KeyboardInterrupt etc.)
+        # still propagates after cleanup — interrupts are never swallowed.
+        close_error: BaseException | None = None
+        try:
+            self._close_file()
+        except BaseException as e:
+            close_error = e
 
         # Call cleanup hook before standard cleanup (even on exception).
         # If the hook fails, capture the error and proceed with cleanup
         # so the temp file never leaks. Re-raise after cleanup if needed.
+        # The hook is skipped whenever the temp will be kept — including a
+        # close error triggering keep_on_error.
         hook_error: BaseException | None = None
-        if self._cleanup_hook is not None and not should_keep:
-            assert self._path is not None
+        will_keep = should_keep or (close_error is not None and self._keep_on_error)
+        if self._cleanup_hook is not None and not will_keep:
             try:
                 self._cleanup_hook(self._path)
-            except Exception as e:
-                if not self._ignore_cleanup_errors:
+            except BaseException as e:
+                # Defer so the temp still gets cleaned. BaseExceptions
+                # (KeyboardInterrupt etc.) are always re-raised later —
+                # ignore_cleanup_errors only silences normal exceptions.
+                if not self._ignore_cleanup_errors or not isinstance(e, Exception):
                     hook_error = e
 
-        if close_error is not None and not had_error:
+        # _exited is set only now so a hook can still call .keep() —
+        # after this point keep() correctly raises "after __exit__".
+        self._exited = True
+        should_keep = should_keep or self._user_keep
+
+        if close_error is not None and (
+            not had_error or not isinstance(close_error, Exception)
+        ):
             effective_keep = should_keep or self._keep_on_error
-            self._finalize_keep_or_clean(effective_keep)
-            raise close_error
+            with contextlib.suppress(OSError):
+                self._finalize_keep_or_clean(effective_keep)
+            raise _merge_deferred(close_error, hook_error)
 
         if should_keep:
             self._kept = True
@@ -168,22 +204,41 @@ class _TempFile:
             with contextlib.suppress(OSError):
                 self._finalize_clean()
         elif self._dest is not None:
-            assert self._path is not None
-            if self._path == self._dest:
+            dest = self._dest_resolved
+            if self._dest != self._dest_entered:
+                # _dest was (re)assigned after __enter__ — resolve it now.
+                dest = Path(os.path.abspath(self._dest))
+            assert dest is not None
+            if self._path == dest:
                 pass  # no-op: dest same as temp
+            elif dest.is_dir():
+                # Same error on every platform and prevents the EXDEV
+                # fallback from moving the temp *inside* the directory.
+                with contextlib.suppress(OSError):
+                    self._finalize_clean()
+                raise _merge_deferred(
+                    IsADirectoryError(f"Destination is a directory: {self._dest}"),
+                    hook_error,
+                )
             else:
+                replace_error: OSError | None = None
                 try:
-                    os.replace(self._path, self._dest)
+                    os.replace(self._path, dest)
                 except OSError as exc:
                     if exc.errno == errno.EXDEV:
                         try:
-                            shutil.move(self._path, self._dest)
-                        except OSError:
+                            shutil.move(self._path, dest)
+                        except OSError as move_exc:
                             self._finalize_clean()
-                            raise
+                            raise _merge_deferred(move_exc, hook_error) from exc
                     else:
-                        self._finalize_clean()
-                        raise
+                        replace_error = exc
+                # Raised outside the except clause: _merge_deferred
+                # already chains the deferred hook error as __cause__ —
+                # `from exc` would clobber it.
+                if replace_error is not None:
+                    self._finalize_clean()
+                    raise _merge_deferred(replace_error, hook_error)
                 self._moved = True
             if self._record is not None:
                 temp_registry.mark_cleaned(self._record)
@@ -250,11 +305,18 @@ class _TempFile:
             return
         self._file.flush()
 
-    def close(self) -> None:
-        if self._closed:
+    def _close_file(self) -> None:
+        """Close the file handle once. ``_closed`` is always set, even if the
+        close itself raises — a failed close must not confuse ``__exit__``."""
+        if self._closed or self._file is None:
             return
-        if self._file is not None:
+        try:
             self._file.close()
+        finally:
+            self._closed = True
+
+    def close(self) -> None:
+        self._close_file()
         self._closed = True
 
     @property
@@ -410,6 +472,8 @@ class _TempDir:
         self._record: TempRecord | None = None
 
     def __enter__(self) -> Path:
+        if self._path is not None and not self._exited:
+            raise RuntimeError("Cannot re-enter an active temp_dir context manager.")
         # Reset state for re-entry (context managers can be reused).
         self._exited = False
         self._deleted = False
@@ -423,11 +487,12 @@ class _TempDir:
             prefix=self._prefix,
             dir=self._dir,
         )
-        self._path = Path(path_str)
+        self._path = Path(os.path.abspath(path_str))
         if self._cwd:
             try:
-                self._cwd_ctx = contextlib.chdir(self._path)
-                self._cwd_ctx.__enter__()
+                cwd_ctx = contextlib.chdir(self._path)
+                cwd_ctx.__enter__()
+                self._cwd_ctx = cwd_ctx
             except Exception:
                 with contextlib.suppress(OSError):
                     shutil.rmtree(self._path)
@@ -442,11 +507,14 @@ class _TempDir:
         exc_val: BaseException | None,
         exc_tb: object | None,
     ) -> None:
-        self._exited = True
+        if self._path is None:
+            return  # never entered (or enter failed) — nothing to finalize
         cwd_error: BaseException | None = None
-        if self._cwd_ctx is not None:
+        cwd_ctx = self._cwd_ctx
+        self._cwd_ctx = None  # cleared first — a dead ctx must not be re-exited
+        if cwd_ctx is not None:
             try:
-                self._cwd_ctx.__exit__(exc_type, exc_val, exc_tb)
+                cwd_ctx.__exit__(exc_type, exc_val, exc_tb)
             except BaseException as e:
                 # Any failure here is deferred so cleanup still runs —
                 # the temp dir must not leak even if cwd restore dies.
@@ -471,12 +539,19 @@ class _TempDir:
         # so the temp dir never leaks. Re-raise after cleanup if needed.
         hook_error: BaseException | None = None
         if self._cleanup_hook is not None and not should_keep:
-            assert self._path is not None
             try:
                 self._cleanup_hook(self._path)
-            except Exception as e:
-                if not self._ignore_cleanup_errors:
+            except BaseException as e:
+                # Defer so the temp still gets cleaned. BaseExceptions
+                # (KeyboardInterrupt etc.) are always re-raised later —
+                # ignore_cleanup_errors only silences normal exceptions.
+                if not self._ignore_cleanup_errors or not isinstance(e, Exception):
                     hook_error = e
+
+        # _exited is set only now so a hook can still call .keep() —
+        # after this point keep() correctly raises "after __exit__".
+        self._exited = True
+        should_keep = should_keep or self._user_keep
 
         if should_keep:
             self._kept = True
@@ -488,10 +563,12 @@ class _TempDir:
         else:
             self._finalize_clean()
 
+        # A non-Exception cwd error (KeyboardInterrupt etc.) propagates
+        # even over a body exception — interrupts are never swallowed.
         if cwd_error is not None and (
-            exc_type is None or not isinstance(cwd_error, OSError)
+            exc_type is None or not isinstance(cwd_error, Exception)
         ):
-            raise cwd_error
+            raise _merge_deferred(cwd_error, hook_error)
         if hook_error is not None and exc_type is None:
             raise hook_error
 

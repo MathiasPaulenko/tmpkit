@@ -101,6 +101,7 @@ disable_error_code = [
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
 addopts = "--cov=tmpkit --cov-branch --cov-report=term-missing"
 

@@ -112,26 +112,37 @@ class TempRegistry:
             active = [r for r in self._records if not r.cleaned and not r.kept]
 
         for record in active:
-            # Re-check under the lock that the record is still active;
-            # another thread may have marked it kept/cleaned since the snapshot.
+            # Claim the record under the lock, delete outside it. A racing
+            # mark_kept()/mark_cleaned() that lands before the claim wins
+            # (we skip); one landing during the filesystem delete loses —
+            # the record is already spoken for. Keeping the fs ops outside
+            # the lock avoids blocking other registry calls during slow
+            # rmtree()s and lets mocked deletes re-enter the registry.
             with self._lock:
                 if record.cleaned or record.kept:
                     continue
+                record.cleaned = True
             try:
-                if not record.path.exists():
-                    # Already gone on disk — mark cleaned without counting.
-                    with self._lock:
-                        record.cleaned = True
-                    continue
-                if record.kind == "dir":
-                    shutil.rmtree(record.path)
-                else:
+                # lexists (not exists) so broken symlinks/dangling
+                # junctions at the temp path are still removed, not
+                # skipped as "gone".
+                if not os.path.lexists(record.path):
+                    continue  # already gone — the claim settled it
+                if record.path.is_symlink() or not record.path.is_dir():
+                    # Files and symlinks are unlinked (never followed).
                     record.path.unlink()
-                with self._lock:
-                    record.cleaned = True
+                else:
+                    try:
+                        shutil.rmtree(record.path)
+                    except NotADirectoryError:
+                        # The path was replaced by a non-directory —
+                        # unlink it.
+                        record.path.unlink()
                 count += 1
             except OSError:
-                pass
+                # Release the claim so a later cleanup_all() can retry.
+                with self._lock:
+                    record.cleaned = False
         return count
 
     def keep_all(self) -> int:
